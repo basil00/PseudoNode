@@ -74,6 +74,13 @@ const char *seeds_litecoin[] =
     "dnsseed.ltc.xurious.com",
     "dnsseed.koin-project.com"
 };
+const char *seeds_dogecoin[] =
+{
+    "seed.dogecoin.com",
+    "seed.mophides.com",
+    "seed.dglibrary.org",
+    "seed.dogechain.info"
+};
 const char *seeds_paycoin[] =
 {
     "dnsseed.paycoin.com"
@@ -93,6 +100,9 @@ const struct coin_info testnet =
 const struct coin_info litecoin =
     {70002, 0xDBB6C0FB, "/Satoshi:0.8.7.5/", 9333, 720000,
      seeds_litecoin, sizeof(seeds_litecoin) / sizeof(char *), false};
+const struct coin_info dogecoin =
+    {70003, 0xC0C0C0C0, "/Shibetoshi:1.8.0/", 22556, 576000,
+     seeds_dogecoin, sizeof(seeds_dogecoin) / sizeof(char *), true};
 const struct coin_info paycoin =
     {70001, 0xAAAAAAAA, "/Satoshi:0.1.2/", 8998, 53000,
      seeds_paycoin, sizeof(seeds_paycoin) / sizeof(char *), false};
@@ -2311,6 +2321,8 @@ int main(int argc, char **argv)
                     coin = &testnet;
                 else if (strcmp(optarg, "litecoin") == 0)
                     coin = &litecoin;
+                else if (strcmp(optarg, "dogecoin") == 0)
+                    coin = &dogecoin;
                 else if (strcmp(optarg, "paycoin") == 0)
                     coin = &paycoin;
                 else if (strcmp(optarg, "flappycoin") == 0)
@@ -2374,8 +2386,8 @@ int main(int argc, char **argv)
                 fprintf(stderr, "\t--coin=COIN\n");
                 fprintf(stderr, "\t\tAttach to COIN network "
                     "(default=bitcoin).  Supported coins are:\n");
-                fprintf(stderr, "\t\tbitcoin, testnet, litecoin, paycoin, "
-                    "flappycoin\n");
+                fprintf(stderr, "\t\tbitcoin, testnet, litecoin, dogecoin, "
+                    "paycoin, flappycoin\n");
                 return 0;
         }
     }

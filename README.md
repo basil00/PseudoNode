@@ -16,8 +16,9 @@ Compared to a normal full node:
 * PseudoNode *does not require the blockchain to be downloaded*.
 * PseudoNode can "sync" with the network in seconds.
 * PseudoNode supports multiple cryptocurrencies that are bitcoin derivatives.
-  Currently supported are testnet, litecoin, paycoin and flappycoin.  It is
-  reasonably trivial to extend the implementation to support more currencies.
+  Currently supported are testnet, litecoin, dogecoin, paycoin and flappycoin.
+  It is reasonably trivial to extend the implementation to support more
+  currencies.
 * PseudoNode is *not* a wallet (cannot be used to store coins).
 * PseudoNode uses no disk space (sans the executable), negligible RAM, and
   negligible CPU time.  PseudoNode consumes about the same network resources
@@ -43,11 +44,12 @@ You can connect to different networks using the --coin=COIN option, e.g.:
 
     pseudonode --coin=testnet
     pseudonode --coin=litecoin
+    pseudonode --coin=dogecoin
     pseudonode --coin=paycoin
     pseudonode --coin=flappycoin
 
 The current implementation supports the following cryptocurrencies: bitcoin,
-testnet (bitcoin), litecoin, paycoin, flappycoin.
+testnet (bitcoin), litecoin, dogecoin, paycoin, flappycoin.
 
 By default, PseudoNode considers data (tx or blocks) valid if 2 other nodes
 also believe so.  This value can be configured via the --threshold=VAL option,
