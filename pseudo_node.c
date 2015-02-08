@@ -1791,8 +1791,9 @@ static bool handle_headers(struct peer *peer, struct table *table)
         return false;
     }
     struct block block = pop(buf, struct block);
-    uint256_t hsh = hash(&block, sizeof(block));
-    ssize_t idx = del_proxy(table, GET_HEADERS, hsh);
+    uint256_t hsh = block.prev_block;
+    uint256_t req_hsh = hsh;
+    ssize_t idx = del_proxy(table, GET_HEADERS, req_hsh);
     if (idx < 0)
         return true;
     size_t zero = pop_varint(buf);
@@ -1803,26 +1804,34 @@ bad_block:
             peer->name);
         return false;
     }
+    count--;
+    hsh = hash(&block, sizeof(block));
     for (size_t i = 0; i < count; i++)
     {
-        struct block prev = pop(buf, struct block);
+        block = pop(buf, struct block);
         zero = pop_varint(buf);
         if (zero != 0)
             goto bad_block;
-        uint256_t prev_hsh = hash(&prev, sizeof(prev));
-        if (memcmp(&block.prev_block, &prev_hsh, sizeof(uint256_t)) != 0)
+        if (memcmp(&block.prev_block, &hsh, sizeof(uint256_t)) != 0)
         {
             warning("[%s] invalid block header sequence (not a chain)",
                 peer->name);
             return false;
         }
-        block = prev;
+        hsh = hash(&block, sizeof(block));
     }
 
     push_buf(peer->out_buf, buf);
     struct peer *p = get_peer(table, idx);
     if (p != NULL && p != peer)
+    {
+        action("complete", "getheaders " HASH_FORMAT " from [%s] to [%s]",
+            HASH(req_hsh), p->name, peer->name);
         send_message_data(p, peer->out_buf);
+    }
+    else
+        warning("[%s] unable to complete getheaders proxy request",
+            peer->name);
     deref_peer(p);
     reset_buf(peer->out_buf);
     return true;
