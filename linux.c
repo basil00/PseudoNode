@@ -27,6 +27,7 @@
 #include <fcntl.h>
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <sys/mman.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
@@ -203,5 +204,24 @@ static void socket_close(sock s)
 static void server(void)
 {
     daemon(1, 0);
+}
+
+static void *system_alloc(size_t size)
+{
+    size_t pagesize = sysconf(_SC_PAGESIZE);
+    size = (((size-1) / pagesize) + 1) * pagesize;
+    void *ptr = mmap(NULL, size, PROT_READ | PROT_WRITE,
+        MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    if (ptr == MAP_FAILED)
+        return NULL;
+    return ptr;
+}
+
+static void system_free(size_t size, void *ptr)
+{
+    size_t pagesize = sysconf(_SC_PAGESIZE);
+    size = (((size-1) / pagesize) + 1) * pagesize;
+    int res = munmap(ptr, size);
+    assert(res == 0);
 }
 

@@ -207,7 +207,7 @@ struct peer
     uint32_t index;
     bool outbound;
     bool error;
-    jmp_buf env;
+    jmp_buf *env;
 };
 
 struct addr
@@ -371,6 +371,41 @@ static void print_log(int type, const char *action, const char *format, ...)
 
 /****************************************************************************/
 
+struct mem
+{
+    size_t size;
+};
+#define MAX_SMALL_ALLOC     (4096 - sizeof(struct mem))
+#define BUFFER_SIZE         (4096 - sizeof(struct mem))
+
+static void *mem_alloc(size_t size)
+{
+    struct mem *mem;
+    if (size < MAX_SMALL_ALLOC)
+        mem = (struct mem *)malloc(sizeof(struct mem) + size);
+    else
+        mem = (struct mem *)system_alloc(sizeof(struct mem) + size);
+    if (mem == NULL)
+       fatal("failed to alloc %u bytes: %s", size, get_error());
+    mem->size = size;
+    return (void *)(mem + 1);
+}
+
+static void mem_free(void *ptr)
+{
+    if (ptr == NULL)
+        return;
+    struct mem *mem = (struct mem *)ptr;
+    mem = mem - 1;
+    size_t size = mem->size;
+    if (size < MAX_SMALL_ALLOC)
+        free(mem);
+    else
+        system_free(sizeof(struct mem) + size, mem);
+}
+
+/****************************************************************************/
+
 static uint64_t addr_salt;
 static uint64_t peer_salt;
 static uint64_t queue_salt;
@@ -444,11 +479,9 @@ static uint64_t rand64(void)
 
 static struct buf *alloc_buf(struct peer *peer)
 {
-    struct buf *buf = (struct buf *)malloc(sizeof(struct buf));
-    assert(buf != NULL);
-    size_t len = BUFSIZ;
-    char *data = (char *)malloc(len * sizeof(char));
-    assert(data != NULL);
+    struct buf *buf = (struct buf *)mem_alloc(sizeof(struct buf));
+    size_t len = BUFFER_SIZE;
+    char *data = (char *)mem_alloc(len);
     buf->peer = peer;
     buf->data = data;
     buf->len  = len;
@@ -458,33 +491,32 @@ static struct buf *alloc_buf(struct peer *peer)
 
 static void reset_buf(struct buf *buf)
 {
-    if (buf->ptr > BUFSIZ)
+    if (buf->len > BUFFER_SIZE)
     {
-        buf->len = BUFSIZ;
-        free(buf->data);
-        buf->data = (char *)malloc(buf->len * sizeof(char));
-        assert(buf->data != NULL);
+        mem_free(buf->data);
+        buf->len = BUFFER_SIZE;
+        buf->data = (char *)mem_alloc(buf->len);
     }
     buf->ptr = 0;
 }
 
 static void free_buf(struct buf *buf)
 {
-    free(buf->data);
-    free(buf);
+    mem_free(buf->data);
+    mem_free(buf);
 }
 
 static void grow_buf(struct buf *buf, size_t len)
 {
     if (buf->len - buf->ptr < len)
     {
+        size_t old_len = buf->len;
         while (buf->len - buf->ptr < len)
-        {
-            buf->len *= 3;
-            buf->len /= 2;
-        }
-        buf->data = (char *)realloc(buf->data, buf->len * sizeof(char));
-        assert(buf->data != NULL);
+            buf->len *= 2;
+        char *old_data = buf->data;
+        buf->data = (char *)mem_alloc(buf->len);
+        memcpy(buf->data, old_data, old_len);
+        mem_free(old_data);
     }
 }
 
@@ -547,7 +579,7 @@ static int pop_error(struct peer *peer, size_t len)
 {
     warning("[%s] message parse error (failed to pop %u bytes)", peer->name,
         len);
-    longjmp(peer->env, 1);
+    longjmp(*peer->env, 1);
 }
 
 #define pop(buf, type)                                                      \
@@ -573,8 +605,7 @@ static char *pop_data(struct buf *buf, size_t len)
 {
     if ((buf)->ptr + (len) > (buf)->len)
         pop_error(buf->peer, len);
-    char *data = (char *)malloc(len * sizeof(char));
-    assert(data != NULL);
+    char *data = mem_alloc(len);
     memcpy(data, buf->data + buf->ptr, len);
     buf->ptr += len;
     return data;
@@ -585,8 +616,7 @@ static char *pop_varstr(struct buf *buf)
     size_t len = pop_varint(buf);
     if (buf->ptr + len > buf->len)
         pop_error(buf->peer, len);
-    char *s = (char *)malloc(len+1);
-    assert(s != NULL);
+    char *s = (char *)mem_alloc(len+1);
     memcpy(s, buf->data + buf->ptr, len);
     s[len] = '\0';
     buf->ptr += len;
@@ -603,12 +633,10 @@ static bool is_empty(struct buf *buf)
 
 static struct table *alloc_table(void)
 {
-    struct table *table = (struct table *)malloc(sizeof(struct table));
-    assert(table != NULL);
+    struct table *table = (struct table *)mem_alloc(sizeof(struct table));
     size_t len = 1024;
-    struct entry **entries = (struct entry **)malloc(
+    struct entry **entries = (struct entry **)mem_alloc(
         len * sizeof(struct entry *));
-    assert(entries != NULL);
     memset(entries, 0, len * sizeof(struct entry *));
     table->len = len;
     table->count = 0;
@@ -636,9 +664,8 @@ static void grow_table(struct table *table)
     size_t len = table->len;
     table->len *= 2;
     struct entry **entries = table->entries;
-    table->entries = (struct entry **)malloc(
+    table->entries = (struct entry **)mem_alloc(
         table->len * sizeof(struct entry *));
-    assert(table->entries != NULL);
     memset(table->entries, 0, table->len * sizeof(struct entry *));
     for (size_t i = 0; i < len; i++)
     {
@@ -652,7 +679,7 @@ static void grow_table(struct table *table)
             table->entries[idx] = e;
         }
     }
-    free(entries);
+    mem_free(entries);
 }
 
 static size_t insert(struct table *table, uint256_t hash, unsigned type,
@@ -677,8 +704,7 @@ static size_t insert(struct table *table, uint256_t hash, unsigned type,
     }
     {
         grow_table(table);
-        struct entry *entry = (struct entry *)malloc(sizeof(struct entry));
-        assert(entry != NULL);
+        struct entry *entry = (struct entry *)mem_alloc(sizeof(struct entry));
         entry->hash = hash;
         entry->type = type;
         entry->vote = vote;
@@ -778,8 +804,8 @@ static void deref_data(struct table *table, uint256_t hash)
                 prev->next = entry->next;
             table->count--;
             mutex_unlock(&table->lock);
-            free(entry->data);
-            free(entry);
+            mem_free(entry->data);
+            mem_free(entry);
             return;
         }
         prev = entry;
@@ -877,8 +903,8 @@ static void garbage_collect(struct table *table)
                     table->count--;
                     struct entry *e = entry;
                     entry = entry->next;
-                    free(e->data);
-                    free(e);
+                    mem_free(e->data);
+                    mem_free(e);
                     continue;
                 }
             }
@@ -907,13 +933,12 @@ static void queue_push_address(struct table *table, struct in6_addr addr)
     queue_tail++;
     mutex_unlock(&queue_lock);
 
-    struct in6_addr *addr1 = (struct in6_addr *)malloc(sizeof(addr));
-    assert(addr1 != NULL);
+    struct in6_addr *addr1 = (struct in6_addr *)mem_alloc(sizeof(addr));
     *addr1 = addr;
     uint256_t q_hsh = queue_hash(idx);
     insert(table, q_hsh, QUEUE, 1);
     if (!set_data(table, q_hsh, addr1, sizeof(addr)))
-        free(addr1);
+        mem_free(addr1);
 }
 
 // Get a queued address.
@@ -1001,12 +1026,11 @@ static void add_peer(struct table *table, size_t idx)
 
 static void set_peer(struct table *table, size_t idx, struct peer *peer)
 {
-    struct peer **wrap = (struct peer **)malloc(sizeof(struct peer *));
-    assert(wrap != NULL);
+    struct peer **wrap = (struct peer **)mem_alloc(sizeof(struct peer *));
     *wrap = peer;
     uint256_t peer_hsh = peer_hash(idx);
     if (!set_data(table, peer_hsh, wrap, sizeof(struct peer *)))
-        free(wrap);
+        mem_free(wrap);
 }
 
 static struct peer *get_peer(struct table *table, size_t idx)
@@ -1070,12 +1094,11 @@ static void add_proxy(struct table *table, uint32_t type, uint256_t hsh,
     uint256_t proxy_hsh = proxy_hash(type, hsh);
     insert(table, proxy_hsh, PROXY, 1);
 
-    struct proxy *info = (struct proxy *)malloc(sizeof(struct proxy));
-    assert(info != NULL);
+    struct proxy *info = (struct proxy *)mem_alloc(sizeof(struct proxy));
     info->index = idx;
     info->time  = time(NULL);
     if (!set_data(table, proxy_hsh, info, sizeof(struct proxy)))
-        free(info);
+        mem_free(info);
 }
 
 static ssize_t del_proxy(struct table *table, uint32_t type, uint256_t hsh)
@@ -1441,13 +1464,12 @@ static bool insert_address(struct table *table, struct in6_addr addr,
     if (get_vote(table, addr_hsh) != 0)
         return false;
     insert(table, addr_hsh, ADDRESS, 1);
-    struct addr *obj = (struct addr *)malloc(sizeof(struct addr));
-    assert(obj != NULL);
+    struct addr *obj = (struct addr *)mem_alloc(sizeof(struct addr));
     obj->addr = addr;
     obj->time = time;
     if (!set_data(table, addr_hsh, obj, sizeof(struct addr)))
     {
-        free(obj);
+        mem_free(obj);
         return false;
     }
     queue_push_address(table, addr);
@@ -1546,12 +1568,12 @@ static bool handle_tx(struct peer *peer, struct table *table, size_t len)
      if (get_vote(table, tx_hsh) > 0)
      {
          if (!set_data(table, tx_hsh, tx, len))
-             free(tx);
+             mem_free(tx);
          else
              relay_transaction(table, peer, tx_hsh);
      }
      else
-         free(tx);
+         mem_free(tx);
      return true;
 }
 
@@ -1636,7 +1658,7 @@ static bool handle_block(struct peer *peer, struct table *table, uint32_t len)
     uint256_t root = merkle_root(buf);
     if (memcmp(&root, &header->merkle_root, sizeof(uint256_t)) != 0)
     {
-        free(block);
+        mem_free(block);
         warning("[%s] bad block (merkle root does not match)", peer->name);
         return false;
     }
@@ -1646,7 +1668,7 @@ static bool handle_block(struct peer *peer, struct table *table, uint32_t len)
     if (idx > 0)
     {
         make_block(peer, block, len);
-        free(block);
+        mem_free(block);
         finalize_message(peer->out_buf);
         struct peer *p = get_peer(table, idx);
         if (p != NULL && p != peer)
@@ -1669,7 +1691,7 @@ static bool handle_block(struct peer *peer, struct table *table, uint32_t len)
     int diff = curr_time-blk_time;
     if (diff > 900 || diff < -900)
     {
-        free(block);
+        mem_free(block);
         warning("[%s] received non-current block (diff=%d)", peer->name,
             diff);
         return false;
@@ -1677,13 +1699,13 @@ static bool handle_block(struct peer *peer, struct table *table, uint32_t len)
 
     if (get_vote(table, blk_hsh) < THRESHOLD)
     {
-        free(block);
+        mem_free(block);
         warning("[%s] received unsolicited block", peer->name);
         return true;
     }
     if (!set_data(table, blk_hsh, block, len))
     {
-        free(block);
+        mem_free(block);
         warning("[%s] received duplicate block", peer->name);
         return true;
     }
@@ -1880,7 +1902,7 @@ static bool handle_version(struct peer *peer, struct table *table, size_t len)
     pop(buf, uint64_t);       // Nonce
     char *agent = pop_varstr(buf);
     action("connect", "peer [%s] of type \"%s\"", peer->name, agent);
-    free(agent);
+    mem_free(agent);
     int32_t h = pop(buf, uint32_t);
     set_height(h);
     bool use_relay = false;
@@ -1942,8 +1964,8 @@ static bool process_message(struct peer *peer, struct table *table)
         char *reason = pop_varstr(buf);
         warning("[%s] message (%s) rejected by peer (%s)", peer->name,
             message, reason);
-        free(message);
-        free(reason);
+        mem_free(message);
+        mem_free(reason);
     }
     else if (strcmp(hdr.command, "getblocks") == 0)
         ok = true;      // Safe to ignore.
@@ -1963,9 +1985,7 @@ static struct peer *open_peer(struct table *table, int s, bool outbound,
     char name[INET6_ADDRSTRLEN+1];
     inet_ntop(AF_INET6, &addr, name, sizeof(name));
    
-    struct peer *peer = (struct peer *)malloc(sizeof(struct peer));
-    assert(peer != NULL);
-
+    struct peer *peer = (struct peer *)mem_alloc(sizeof(struct peer));
     peer->in_buf = alloc_buf(peer);
     peer->out_buf = alloc_buf(peer);
     peer->sock = s;
@@ -1979,8 +1999,9 @@ static struct peer *open_peer(struct table *table, int s, bool outbound,
     peer->from_addr = get_my_addr();
     peer->from_port = PORT;
     peer->index = idx;
-    peer->name = strdup(name);
-    assert(peer->name != NULL);
+    peer->name = (char *)mem_alloc(strlen(name)+1);
+    strcpy(peer->name, name);
+    peer->env = NULL;
     set_peer(table, peer->index, peer);
     return peer;
 }
@@ -1995,8 +2016,8 @@ static void deref_peer(struct peer *peer)
     socket_close(peer->sock);
     free_buf(peer->in_buf);
     free_buf(peer->out_buf);
-    free(peer->name);
-    free(peer);
+    mem_free(peer->name);
+    mem_free(peer);
 }
 
 static void close_peer(struct table *table, struct peer *peer)
@@ -2014,7 +2035,7 @@ static void *inbound_worker(void *arg)
     size_t peer_idx = info->peer_idx;
     int s = info->sock;
     struct in6_addr addr = info->addr;
-    free(info);
+    mem_free(info);
 
     char name[INET6_ADDRSTRLEN+1];
     inet_ntop(AF_INET6, &addr, name, sizeof(name));
@@ -2029,14 +2050,14 @@ static void *inbound_worker(void *arg)
         delete(table, addr_hsh);
         goto worker_exit;
     }
- 
-    if (setjmp(peer->env))
+    jmp_buf env;
+    if (setjmp(env))
     {
         warning("[%s] message parse error", peer->name);
         close_peer(table, peer);
         return NULL;
     }
-
+    peer->env = &env;
     if (queue_need_addresses())
     {
         make_getaddr(peer);
@@ -2063,7 +2084,7 @@ static void *outbound_worker(void *arg)
     struct table *table = info->table;
     struct in6_addr addr = info->addr;
     size_t peer_idx = info->peer_idx;
-    free(info);
+    mem_free(info);
 
     char name[INET6_ADDRSTRLEN+1];
     inet_ntop(AF_INET6, &addr, name, sizeof(name));
@@ -2090,12 +2111,14 @@ static void *outbound_worker(void *arg)
         delete(table, addr_hsh);
         goto worker_exit;
     }
-    if (setjmp(peer->env))
+    jmp_buf env;
+    if (setjmp(env))
     {
         warning("[%s] message parse error", peer->name);
         close_peer(table, peer);
         return NULL;
     }
+    peer->env = &env;
     make_version(peer, rand64(), get_height(), true);
     send_message(peer);
     if (queue_need_addresses())
@@ -2138,14 +2161,14 @@ static void manager(struct table *table)
             if (memcmp(&zero, &addr, sizeof(addr)) != 0)
             {
                 add_peer(table, idx);
-                struct info *info = (struct info *)malloc(sizeof(struct info));
-                assert(info != NULL);
+                struct info *info = (struct info *)mem_alloc(
+                    sizeof(struct info));
                 memset(info, 0, sizeof(struct info));
                 info->table = table;
                 info->addr = addr;
                 info->peer_idx = idx;
                 if (!spawn_thread(outbound_worker, (void *)info))
-                    free(info);
+                    mem_free(info);
             }
         }
 
@@ -2174,9 +2197,8 @@ static void manager(struct table *table)
             }
             ssize_t idx = get_free_idx(table, true);
             add_peer(table, idx);
-            struct info *info = (struct info *)malloc(
+            struct info *info = (struct info *)mem_alloc(
                 sizeof(struct info));
-            assert(info != NULL);
             info->table = table;
             info->peer_idx = idx;
             info->sock = s1;
@@ -2184,7 +2206,7 @@ static void manager(struct table *table)
             if (!spawn_thread(inbound_worker, (void *)info))
             {
                 socket_close(s1);
-                free(info);
+                mem_free(info);
             }
         }
     }
@@ -2290,7 +2312,7 @@ int main(int argc, char **argv)
     peer_salt = (uint32_t)rand64();
     queue_salt = (uint32_t)rand64();
     struct table *table = alloc_table();
-    
+   
     static struct option long_options[] =
     {
         {"client",    1, 0, OPTION_CLIENT},

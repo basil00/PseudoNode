@@ -27,6 +27,11 @@
 #include <ws2tcpip.h>
 #include <windows.h>
 
+extern const char *inet_ntop(int af, const void *src, char *dst,
+    socklen_t size);
+extern int inet_pton(int af, const char *src, void *dst);
+extern errno_t rand_s(unsigned int* r);
+
 #define IPV6_V6ONLY         27      // Missing def for MinGW.
 
 #define STDERR              GetStdHandle(STD_ERROR_HANDLE)
@@ -141,7 +146,8 @@ static sock socket_open(bool nonblock)
         return INVALID_SOCKET;
     }
     unsigned off = 0;
-    if (setsockopt(s, IPPROTO_IPV6, IPV6_V6ONLY, &off, sizeof(off)) != 0)
+    if (setsockopt(s, IPPROTO_IPV6, IPV6_V6ONLY, (char *)&off,
+            sizeof(off)) != 0)
     {
         closesocket(s);
         return INVALID_SOCKET;
@@ -236,5 +242,16 @@ static void socket_close(sock s)
 static void server(void)
 {
     // NYI
+}
+
+static void *system_alloc(size_t size)
+{
+    return VirtualAlloc(NULL, size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+}
+
+static void system_free(size_t size, void *ptr)
+{
+    bool res = VirtualFree(ptr, 0, MEM_RELEASE);
+    assert(res);
 }
 
