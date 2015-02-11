@@ -32,6 +32,7 @@
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
 #include <netdb.h>
+#include <pwd.h>
 #include <pthread.h>
 
 static bool use_color = false;
@@ -204,6 +205,12 @@ static void socket_close(sock s)
 static void server(void)
 {
     daemon(1, 0);
+
+    struct passwd *entry = getpwnam("nobody");
+    if (entry == NULL)
+        return;
+    setgid(entry->pw_gid);
+    setuid(entry->pw_uid);
 }
 
 static void *system_alloc(size_t size)

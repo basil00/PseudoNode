@@ -21,8 +21,8 @@ Compared to a normal full node:
   currencies.
 * PseudoNode is *not* a wallet (cannot be used to store coins).
 * PseudoNode uses no disk space (sans the executable), negligible RAM, and
-  negligible CPU time.  PseudoNode consumes about the same network resources
-  (data usage/bandwidth) as a normal full node.
+  negligible CPU time.  PseudoNode also consumes less network resources
+  (data usage/bandwidth) than a normal full node.
 
 PseudoNode can be downloaded from here (the official release):
 
@@ -59,6 +59,15 @@ e.g.:
 
 Higher values will slow the node down.  Lower values make it more likely the
 node will relay erroneous data.  The default of 2 is a good compromise.
+
+By default PseudoNode will fetch objects (txs and blocks) only if other nodes
+explicitly request for them.  It is possible to configure PseudoNode to fetch
+objects immediately via the option:
+
+    pseudonode --prefetch
+
+Note that enabling this option will cause PseudoNode to consume more bandwidth
+(on par with a normal full node).
 
 To run PseudoNode as a background process use the --server option.  Currently
 only works for Linux:

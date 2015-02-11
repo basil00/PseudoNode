@@ -40,6 +40,7 @@ static size_t MAX_OUTBOUND_PEERS = 8;
 static const char *USER_AGENT = NULL;
 static bool STEALTH = false;
 static bool SERVER = false;
+static bool PREFETCH = false;
 
 struct coin_info
 {
@@ -132,10 +133,6 @@ const struct coin_info flappycoin =
 #define ADDRESS                     3
 #define PEER                        4
 #define QUEUE                       5
-#define PROXY                       6
-
-#define GET_BLOCK                   1
-#define GET_HEADERS                 2
 
 static uint64_t rand64(void);
 
@@ -210,26 +207,23 @@ struct peer
     jmp_buf *env;
 };
 
-struct addr
-{
-    struct in6_addr addr;
-    time_t time;
-};
-
-struct proxy
+struct delay
 {
     size_t index;
-    time_t time;
+    struct delay *next;
 };
 
 struct entry
 {
     uint256_t hash;
     uint64_t vote;
-    uint16_t type;
+    time_t time;
+    uint8_t type;
+    uint8_t state;
     uint16_t ref_count;
     uint32_t len;
     void *data;
+    struct delay *delays;
     struct entry *next;
 };
 
@@ -248,6 +242,12 @@ struct info
     int sock;
     struct in6_addr addr;
 };
+
+// Entry states:
+#define MISSING         0
+#define OBSERVED        1
+#define FETCHING        2
+#define AVAILABLE       3
 
 static void deref_peer(struct peer *peer);
 
@@ -371,6 +371,9 @@ static void print_log(int type, const char *action, const char *format, ...)
 
 /****************************************************************************/
 
+// #define USE_MALLOC 
+
+#ifndef USE_MALLOC
 struct mem
 {
     size_t size;
@@ -403,13 +406,17 @@ static void mem_free(void *ptr)
     else
         system_free(sizeof(struct mem) + size, mem);
 }
+#else
+#define BUFFER_SIZE         4096
+#define mem_alloc           malloc
+#define mem_free            free
+#endif
 
 /****************************************************************************/
 
 static uint64_t addr_salt;
 static uint64_t peer_salt;
 static uint64_t queue_salt;
-static uint64_t proxy_salt;
 
 extern void sha256(const void *data, size_t len, void *res);
 static uint256_t hash(const void *data, size_t len)
@@ -439,13 +446,6 @@ static uint256_t queue_hash(size_t idx)
 {
     size_t key[2] = {queue_salt, idx};
     return hash(key, sizeof(key));
-}
-
-static uint256_t proxy_hash(uint32_t type, uint256_t hsh)
-{
-    hsh.i64[0] ^= proxy_salt;
-    hsh.i64[1] += type;
-    return hash(&hsh, sizeof(hsh));
 }
 
 /****************************************************************************/
@@ -683,11 +683,12 @@ static void grow_table(struct table *table)
 }
 
 static size_t insert(struct table *table, uint256_t hash, unsigned type,
-    uint64_t peer_idx)
+    uint64_t vote_idx)
 {
-    size_t vote = (peer_idx >= MAX_OUTBOUND_PEERS? 0:
-        (1 << (peer_idx % (sizeof(uint64_t) * 8))));
+    size_t vote = (vote_idx >= MAX_OUTBOUND_PEERS? 0:
+        (1 << (vote_idx % (sizeof(uint64_t) * 8))));
 
+    time_t curr_time = time(NULL);
     mutex_lock(&table->lock);
     size_t idx = get_index(table, hash);
     struct entry *entry = table->entries[idx];
@@ -708,15 +709,31 @@ static size_t insert(struct table *table, uint256_t hash, unsigned type,
         entry->hash = hash;
         entry->type = type;
         entry->vote = vote;
+        entry->time = curr_time;
+        entry->state = OBSERVED;
         entry->ref_count = 1;
         entry->len = 0;
         entry->data = NULL;
+        entry->delays = NULL;
         entry->next = table->entries[idx];
         table->entries[idx] = entry;
         table->count++;
     }
     mutex_unlock(&table->lock);
     return (vote != 0? 1: 0);
+}
+
+static void free_entry(struct entry *entry)
+{
+    struct delay *delays = entry->delays;
+    while (delays != NULL)
+    {
+        struct delay *d = delays;
+        delays = delays->next;
+        mem_free(d);
+    }
+    mem_free(entry->data);
+    mem_free(entry);
 }
 
 static struct entry *get_entry(struct table *table, uint256_t hash)
@@ -745,6 +762,7 @@ static bool set_data(struct table *table, uint256_t hash, void *data,
         {
             entry->len = len;
             entry->data = data;
+            entry->state = AVAILABLE;
         }
         else
             ok = false;
@@ -774,16 +792,7 @@ static void *get_data(struct table *table, uint256_t hash, size_t *lenptr)
     return data;
 }
 
-static bool have_data(struct table *table, uint256_t hash)
-{
-    mutex_lock(&table->lock);
-    struct entry *entry = get_entry(table, hash);
-    bool have = (entry != NULL? entry->data != NULL: false);
-    mutex_unlock(&table->lock);
-    return have;
-}
-
-static void deref_data(struct table *table, uint256_t hash)
+static bool deref_data(struct table *table, uint256_t hash)
 {
     mutex_lock(&table->lock);
     size_t idx = get_index(table, hash);
@@ -796,7 +805,7 @@ static void deref_data(struct table *table, uint256_t hash)
             {
                 entry->ref_count--;
                 mutex_unlock(&table->lock);
-                return;
+                return false;
             }
             if (prev == NULL)
                 table->entries[idx] = entry->next;
@@ -804,28 +813,109 @@ static void deref_data(struct table *table, uint256_t hash)
                 prev->next = entry->next;
             table->count--;
             mutex_unlock(&table->lock);
-            mem_free(entry->data);
-            mem_free(entry);
-            return;
+            free_entry(entry);
+            return true;
         }
         prev = entry;
         entry = entry->next;
     }
     mutex_unlock(&table->lock);
+    return false;
 }
 
-static size_t get_vote(struct table *table, uint256_t hash)
+static unsigned set_state(struct table *table, uint256_t hash, unsigned state)
+{
+    time_t curr_time = time(NULL);
+    unsigned old_state = MISSING;
+    mutex_lock(&table->lock);
+    struct entry *entry = get_entry(table, hash);
+    if (entry != NULL && entry->state < state)
+    {
+        old_state = entry->state;
+        entry->state = state;
+        entry->time = curr_time;
+    }
+    mutex_unlock(&table->lock);
+    return old_state;
+}
+
+static unsigned get_state(struct table *table, uint256_t hsh)
+{
+    unsigned state = MISSING;
+    mutex_lock(&table->lock);
+    struct entry *entry = get_entry(table, hsh);
+    if (entry != NULL)
+        state = entry->state;
+    mutex_unlock(&table->lock);
+    return state;
+}
+
+static void set_time(struct table *table, uint256_t hsh, time_t time)
+{
+    mutex_lock(&table->lock);
+    struct entry *entry = get_entry(table, hsh);
+    if (entry != NULL)
+        entry->time = time;
+    mutex_unlock(&table->lock);
+}
+
+static time_t get_time(struct table *table, uint256_t hsh)
+{
+    time_t time = 0;
+    mutex_lock(&table->lock);
+    struct entry *entry = get_entry(table, hsh);
+    if (entry != NULL)
+        time = entry->time;
+    mutex_unlock(&table->lock);
+    return time;
+}
+
+static uint64_t get_vote_mask(struct table *table, uint256_t hash)
 {
     mutex_lock(&table->lock);
     struct entry *entry = get_entry(table, hash);
-    size_t vote = (entry != NULL? entry->vote: 0);
+    uint64_t vote = (entry != NULL? entry->vote: 0);
     mutex_unlock(&table->lock);
-    return popcount(vote);
+    return vote;
 }
 
-static void delete(struct table *table, uint256_t hash)
+#define get_vote(table, hsh)    popcount(get_vote_mask((table), (hsh)))
+
+static void set_delay(struct table *table, uint256_t hsh, size_t idx)
 {
-    deref_data(table, hash);
+    struct delay *d = (struct delay *)mem_alloc(sizeof(struct delay));
+    d->index = idx;
+    bool ok = false;
+    mutex_lock(&table->lock);
+    struct entry *entry = get_entry(table, hsh);
+    if (entry != NULL)
+    {
+        ok = true;
+        d->next = entry->delays;
+        entry->delays = d;
+    }
+    mutex_unlock(&table->lock);
+    if (!ok)
+        mem_free(d);
+}
+
+static struct delay *get_delays(struct table *table, uint256_t hsh)
+{
+    struct delay *delays = NULL;
+    mutex_lock(&table->lock);
+    struct entry *entry = get_entry(table, hsh);
+    if (entry != NULL)
+    {
+        delays = entry->delays;
+        entry->delays = NULL;
+    }
+    mutex_unlock(&table->lock);
+    return delays;
+}
+
+static bool delete(struct table *table, uint256_t hash)
+{
+    return deref_data(table, hash);
 }
 
 // Stop-the-world and clean-up all "stale" objects.  This is done everytime a
@@ -833,60 +923,30 @@ static void delete(struct table *table, uint256_t hash)
 static void garbage_collect(struct table *table)
 {
     time_t curr_time = time(NULL);
-    size_t num_tx, num_blk, num_proxy, num_addr;
-    num_tx = num_blk = num_proxy = num_addr = 0;
+    size_t num_tx, num_blk, num_addr, num_bytes;
+    num_tx = num_blk = num_addr = num_bytes = 0;
     mutex_lock(&table->lock);
     for (size_t i = 0; i < table->len; i++)
     {
         struct entry *entry = table->entries[i], *prev = NULL;
         while (entry != NULL)
         {
+            int diff = abs(curr_time - entry->time);
             bool del = false;
             switch (entry->type)
             {
                 case TX:
-                    num_tx++;
-                    del = true;
+                    del = (entry->state != FETCHING || diff > 5);
+                    num_tx += del;
                     break;
                 case BLOCK:
-                {
-                    if (entry->data == NULL)
-                        del = true;
-                    else
-                    {
-                        struct block *header = (struct block *)entry->data;
-                        int diff = curr_time - (time_t)header->timestamp;
-                        del = (diff > 600 || diff < -600);
-                    }
+                    del = (diff > 150);
                     num_blk += del;
                     break;
-                }
                 case ADDRESS:
-                {
-                    if (entry->data == NULL)
-                        del = true;
-                    else
-                    {
-                        struct addr *addr = (struct addr *)entry->data;
-                        int diff = curr_time - addr->time;
-                        del = (diff > 10800 || diff < -10800);
-                    }
+                    del = (diff > 10800);
                     num_addr += del;
                     break;
-                }
-                case PROXY:
-                {
-                    if (entry->data == NULL)
-                        del = true;
-                    else
-                    {
-                        struct proxy *proxy = (struct proxy *)entry->data;
-                        int diff = curr_time - proxy->time;
-                        del = (diff > 60 || diff < -60);
-                    }
-                    num_proxy += del;
-                    break;
-                }
                 default:
                     break;
             }
@@ -903,8 +963,8 @@ static void garbage_collect(struct table *table)
                     table->count--;
                     struct entry *e = entry;
                     entry = entry->next;
-                    mem_free(e->data);
-                    mem_free(e);
+                    num_bytes += e->len;
+                    free_entry(e);
                     continue;
                 }
             }
@@ -913,8 +973,8 @@ static void garbage_collect(struct table *table)
         }
     }
     mutex_unlock(&table->lock);
-    action("cleanup", "%u txs, %u blocks, %u proxy requests, %u addresses",
-        num_tx, num_blk, num_proxy, num_addr);
+    action("cleanup", "%u txs, %u blocks, %u addresses, %u bytes", num_tx,
+        num_blk, num_addr, num_bytes);
 }
 
 /****************************************************************************/
@@ -975,8 +1035,9 @@ static size_t queue_get_addresses(struct table *table, struct buf *buf,
     size_t start = queue_head, end = queue_tail;
     mutex_unlock(&queue_lock);
 
+    time_t curr_time = time(NULL);
     size_t num_addr = 0;
-    while (start < end && num_addr < maxlen)
+    for (; start < end && num_addr < maxlen; start++)
     {
         uint256_t q_hsh = queue_hash(start);
         struct in6_addr *addr = (struct in6_addr *)get_data(table, q_hsh,
@@ -986,20 +1047,17 @@ static size_t queue_get_addresses(struct table *table, struct buf *buf,
             struct in6_addr a = *addr;
             deref_data(table, q_hsh);
             uint256_t a_hsh = addr_hash(a);
-            struct addr *entry = (struct addr *)get_data(table, a_hsh, NULL);
-            if (entry != NULL)
-            {
-                push(buf, entry->time);
-                deref_data(table, a_hsh);
-                uint64_t services = NODE_NETWORK;
-                push(buf, services);
-                push(buf, a);
-                uint16_t port = PORT;
-                push(buf, port);
-                num_addr++;
-            }
+            time_t time = get_time(table, a_hsh);
+            if (time == 0 || abs(time - curr_time) > 10800)
+                continue;
+            push(buf, time);
+            uint64_t services = NODE_NETWORK;
+            push(buf, services);
+            push(buf, a);
+            uint16_t port = PORT;
+            push(buf, port);
+            num_addr++;
         }
-        start++;
     }
     return num_addr;
 }
@@ -1082,37 +1140,6 @@ static ssize_t get_free_idx(struct table *table, bool inbound)
     size_t idx = num_peers;
     num_peers++;
     mutex_unlock(&peer_lock);
-    return idx;
-}
-
-/****************************************************************************/
-// Proxy requests:
-
-static void add_proxy(struct table *table, uint32_t type, uint256_t hsh,
-    size_t idx)
-{
-    uint256_t proxy_hsh = proxy_hash(type, hsh);
-    insert(table, proxy_hsh, PROXY, 1);
-
-    struct proxy *info = (struct proxy *)mem_alloc(sizeof(struct proxy));
-    info->index = idx;
-    info->time  = time(NULL);
-    if (!set_data(table, proxy_hsh, info, sizeof(struct proxy)))
-        mem_free(info);
-}
-
-static ssize_t del_proxy(struct table *table, uint32_t type, uint256_t hsh)
-{
-    uint256_t proxy_hsh = proxy_hash(type, hsh);
-    struct proxy *info = (struct proxy *)get_data(table, proxy_hsh, NULL);
-    ssize_t idx = -1;
-    if (info == NULL)
-        return idx;
-    time_t curr_time = time(NULL);
-    if (curr_time - info->time < 20)
-        idx = info->index;
-    deref_data(table, proxy_hsh);
-    delete(table, proxy_hsh);
     return idx;
 }
 
@@ -1409,52 +1436,40 @@ static void relay_address(struct table *table, struct peer *peer,
     reset_buf(peer->out_buf);
 }
 
-static struct peer *find_proxy(struct table *table, struct peer *peer)
+static void fetch(struct table *table, struct peer *peer,
+    bool any, uint32_t type, uint256_t hsh)
 {
-    size_t offset = rand64() % MAX_OUTBOUND_PEERS;
-    for (size_t i = 0; i < MAX_OUTBOUND_PEERS; i++)
+    // Find a suitable peer:
+    uint64_t mask = (any? UINT64_MAX: get_vote_mask(table, hsh));
+    size_t offset = rand64();
+    bool found = false;
+    struct peer *p = NULL;
+    for (size_t i = 0; !found && i < MAX_OUTBOUND_PEERS; i++)
     {
         size_t idx = (i + offset) % MAX_OUTBOUND_PEERS;
-        struct peer *p = get_peer(table, idx);
+        if (((1 << idx) & mask) == 0)
+            continue;
+        p = get_peer(table, idx);
         if (p != NULL && p != peer)
-            return p;
+            found = true;
     }
-    return NULL;
-}
+    if (!found)
+    {
+        warning("failed to fetch " HASH_FORMAT_SHORT "; no suitable peer",
+            HASH_SHORT(hsh));
+        return;
+    }
 
-static bool proxy_getdata(struct table *table, struct peer *peer,
-    uint32_t type, uint256_t hsh)
-{
     make_getdata(peer, type, hsh);
     finalize_message(peer->out_buf);
-    struct peer *p = find_proxy(table, peer);
-    if (p != NULL)
-    {
-        send_message_data(p, peer->out_buf);
-        add_proxy(table, GET_BLOCK, hsh, peer->index);
-        action("proxy", "getdata " HASH_FORMAT " from [%s] to [%s]",
-            HASH(hsh), peer->name, p->name);
-        deref_peer(p);
-    }
+    send_message_data(p, peer->out_buf);
     reset_buf(peer->out_buf);
-    return (p != NULL);
 }
 
 static bool proxy_getheaders(struct table *table, struct peer *peer,
     struct buf *buf, uint256_t hsh)
 {
-    push_buf(peer->out_buf, peer->in_buf);
-    struct peer *p = find_proxy(table, peer);
-    if (p != NULL)
-    {
-        send_message_data(p, peer->out_buf);
-        add_proxy(table, GET_HEADERS, hsh, peer->index);
-        action("proxy", "getheaders " HASH_FORMAT " from [%s] to [%s]",
-            HASH(hsh), peer->name, p->name);
-        deref_peer(p);
-    }
-    reset_buf(peer->out_buf);
-    return (p != NULL);
+    return false;       // TODO: re-implement
 }
 
 static bool insert_address(struct table *table, struct in6_addr addr,
@@ -1464,17 +1479,11 @@ static bool insert_address(struct table *table, struct in6_addr addr,
     if (get_vote(table, addr_hsh) != 0)
         return false;
     insert(table, addr_hsh, ADDRESS, 1);
-    struct addr *obj = (struct addr *)mem_alloc(sizeof(struct addr));
-    obj->addr = addr;
-    obj->time = time;
-    if (!set_data(table, addr_hsh, obj, sizeof(struct addr)))
-    {
-        mem_free(obj);
-        return false;
-    }
+    set_time(table, addr_hsh, time);
     queue_push_address(table, addr);
     char name[INET6_ADDRSTRLEN+1];
     inet_ntop(AF_INET6, &addr, name, sizeof(name));
+    action("found", "address [%s]", name);
     return true;
 }
 
@@ -1521,60 +1530,119 @@ static bool handle_inv(struct peer *peer, struct table *table, size_t len)
     size_t num_ent = pop_varint(buf);
     if (!peer->outbound)    // Inbound peers are not trusted. 
         return true;
-
     for (size_t i = 0; i < num_ent; i++)
     {
         uint32_t type = pop(buf, uint32_t);
         uint256_t hsh = pop(buf, uint256_t);
-        bool ok = true;
 
         switch (type)
         {
             case MSG_TX:
             {
                 size_t count = insert(table, hsh, TX, peer->index);
-                if (count == THRESHOLD && !have_data(table, hsh))
-                {
-                    make_getdata(peer, type, hsh);
-                    ok = send_message(peer);
-                }
+                if (count != THRESHOLD)
+                    continue;
+                relay_transaction(table, peer, hsh);
                 break;
             }
             case MSG_BLOCK:
             {
                 size_t count = insert(table, hsh, BLOCK, peer->index);
-                if (count == THRESHOLD && !have_data(table, hsh))
-                {
-                    make_getdata(peer, type, hsh);
-                    ok = send_message(peer);
-                }
+                if (count != THRESHOLD)
+                    continue;
+                log("----------------------------------NEW BLOCK"
+                    "-----------------------------------");
+                uint32_t h = get_height();
+                set_height(h+1);
+                garbage_collect(table);
+                relay_block(table, peer, hsh);
                 break;
             }
             default:
                 // NYI:
-                break;
+                continue;
         }
-        if (!ok)
-            return false;
+
+        if (PREFETCH)
+        {
+            unsigned state = set_state(table, hsh, FETCHING);
+            if (state != OBSERVED)
+                continue;
+            fetch(table, peer, false, type, hsh);
+        }
+    }
+    return true;
+}
+
+static bool handle_notfound(struct peer *peer, struct table *table)
+{
+    if (!peer->outbound)
+        return true;
+    struct buf *buf = peer->in_buf;
+    size_t num_ent = pop_varint(buf);
+    for (size_t i = 0; i < num_ent; i++)
+    {
+        uint32_t type = pop(buf, uint32_t);
+        uint256_t hsh = pop(buf, uint256_t);
+
+        struct delay *delays = get_delays(table, hsh);
+        if (delays == NULL)
+            continue;
+        make_notfound(peer, type, hsh);
+        finalize_message(peer->out_buf);
+        while (delays != NULL)
+        {
+            struct delay *d = delays;
+            struct peer *p = get_peer(table, d->index);
+            if (p != NULL && p != peer)
+            {
+                action("notfound", HASH_FORMAT_SHORT " (%s) to [%s]",
+                    HASH_SHORT(hsh), (type == MSG_TX? "tx": "blk"),
+                    p->name);
+                send_message_data(p, peer->out_buf);
+            }
+            delays = delays->next;
+            mem_free(d);
+        }
+        reset_buf(peer->out_buf);
     }
     return true;
 }
 
 static bool handle_tx(struct peer *peer, struct table *table, size_t len)
 {
-     struct buf *buf = peer->in_buf;
-     char *tx = pop_data(buf, len);
-     uint256_t tx_hsh = hash(tx, len);
-     if (get_vote(table, tx_hsh) > 0)
-     {
-         if (!set_data(table, tx_hsh, tx, len))
-             mem_free(tx);
-         else
-             relay_transaction(table, peer, tx_hsh);
-     }
-     else
-         mem_free(tx);
-     return true;
+    struct buf *buf = peer->in_buf;
+    char *tx = pop_data(buf, len);
+    uint256_t tx_hsh = hash(tx, len);
+
+    if (get_vote(table, tx_hsh) == 0)
+        return true;
+
+    struct delay *delays = get_delays(table, tx_hsh);
+    if (delays != NULL)
+    {
+        make_tx(peer, tx, len);
+        finalize_message(peer->out_buf);
+    }
+    while (delays != NULL)
+    {
+        struct delay *d = delays;
+        struct peer *p = get_peer(table, d->index);
+        if (p != NULL && p != peer)
+        {
+            action("send", HASH_FORMAT_SHORT " (tx) to [%s]",
+                HASH_SHORT(tx_hsh), p->name);
+            send_message_data(p, peer->out_buf);
+        }
+        delays = delays->next;
+        mem_free(d);
+    }
+    reset_buf(peer->out_buf);
+
+    // Cache tx
+    if (!set_data(table, tx_hsh, tx, len))
+        mem_free(tx);
+    return true;
 }
 
 // Calculate the Merkle root.  This is necessary to verify blocks are correct.
@@ -1663,44 +1731,35 @@ static bool handle_block(struct peer *peer, struct table *table, uint32_t len)
         return false;
     }
 
-    // Check for proxy request
-    ssize_t idx = del_proxy(table, GET_BLOCK, blk_hsh);
-    if (idx > 0)
+    struct delay *delays = get_delays(table, blk_hsh);
+    if (delays != NULL)
     {
         make_block(peer, block, len);
-        mem_free(block);
         finalize_message(peer->out_buf);
-        struct peer *p = get_peer(table, idx);
+    }
+    while (delays != NULL)
+    {
+        struct delay *d = delays;
+        struct peer *p = get_peer(table, d->index);
         if (p != NULL && p != peer)
         {
-            action("complete", "getdata " HASH_FORMAT " from [%s] to [%s]",
-                HASH(blk_hsh), p->name, peer->name);
+            action("send", HASH_FORMAT_SHORT " (blk) to [%s]",
+                HASH_SHORT(blk_hsh), p->name);
             send_message_data(p, peer->out_buf);
         }
-        else
-            warning("[%s] unable to complete getdata proxy request",
-                peer->name);
-        deref_peer(p);
-        reset_buf(peer->out_buf);
-        return true;
+        delays = delays->next;
+        mem_free(d);
     }
+    reset_buf(peer->out_buf);
 
-    // Check if this is a recent block
+    // Cache recent blocks:
     time_t curr_time = time(NULL);
     time_t blk_time = header->timestamp;
     int diff = curr_time-blk_time;
     if (diff > 900 || diff < -900)
     {
+        // Ignore old block:
         mem_free(block);
-        warning("[%s] received non-current block (diff=%d)", peer->name,
-            diff);
-        return false;
-    }
-
-    if (get_vote(table, blk_hsh) < THRESHOLD)
-    {
-        mem_free(block);
-        warning("[%s] received unsolicited block", peer->name);
         return true;
     }
     if (!set_data(table, blk_hsh, block, len))
@@ -1710,14 +1769,6 @@ static bool handle_block(struct peer *peer, struct table *table, uint32_t len)
         return true;
     }
 
-    log("----------------------------------NEW BLOCK---------------------"
-        "--------------");
-
-    // Block is recent, flush all txs & relay
-    uint32_t h = get_height();
-    set_height(h+1);
-    garbage_collect(table);
-    relay_block(table, peer, blk_hsh);
     return true;
 }
 
@@ -1740,27 +1791,58 @@ static bool handle_getdata(struct peer *peer, struct table *table)
 {
     struct buf *buf = peer->in_buf;
     size_t len = pop_varint(buf);
-    for (size_t i = 0; i < len; i++)
+    bool ok = true;
+    for (size_t i = 0; ok && i < len; i++)
     {
         uint32_t type = pop(buf, uint32_t);
         uint256_t hsh = pop(buf, uint256_t);
-        size_t data_len;
-        void *data = get_data(table, hsh, &data_len);
-        bool ok = true;
+        unsigned state = get_state(table, hsh);
+        size_t data_len = 0;
+        void *data = NULL;
+        retry:
+        switch (state)
+        {
+            case OBSERVED:
+                if (get_vote(table, hsh) < THRESHOLD)
+                    goto not_found;
+                state = set_state(table, hsh, FETCHING);
+                if (state != OBSERVED)
+                    goto retry;
+                set_delay(table, hsh, peer->index);
+                fetch(table, peer, false, type, hsh);
+                continue;
+            case FETCHING:
+                set_delay(table, hsh, peer->index);
+                continue;
+            case AVAILABLE:
+                data = get_data(table, hsh, &data_len);
+                if (data != NULL)
+                    break;
+                goto not_found;
+            case MISSING:
+                if (type == MSG_BLOCK)
+                {
+                    // Possible request for old block:
+                    insert(table, hsh, BLOCK, 0);
+                    state = set_state(table, hsh, FETCHING);
+                    if (state != OBSERVED)
+                        goto retry;
+                    set_delay(table, hsh, peer->index);
+                    fetch(table, peer, true, type, hsh);
+                    continue;
+                }
+                // Fall through:
+            default:
+            not_found:
+                make_notfound(peer, type, hsh);
+                ok = send_message(peer);
+                continue;
+        }
+
         switch (type)
         {
             case MSG_TX:
             {
-                if (data == NULL)
-                {
-                    warning("[%s] tx " HASH_FORMAT " not found", peer->name,
-                        HASH(hsh));
-                    make_notfound(peer, type, hsh);
-                    ok = send_message(peer);
-                    if (!ok)
-                        break;
-                    continue;
-                }
                 make_tx(peer, data, data_len);
                 ok = send_message(peer);
                 action("send", HASH_FORMAT_SHORT " (tx) to [%s]",
@@ -1769,18 +1851,10 @@ static bool handle_getdata(struct peer *peer, struct table *table)
             }
             case MSG_BLOCK:
             {
-                if (data == NULL)
-                {
-                    proxy_getdata(table, peer, type, hsh);
-                    continue;
-                }
-                else
-                {
-                    make_block(peer, data, data_len);
-                    ok = send_message(peer);
-                    action("send", HASH_FORMAT_SHORT " (blk) to [%s]",
-                        HASH_SHORT(hsh), peer->name);
-                }
+                make_block(peer, data, data_len);
+                ok = send_message(peer);
+                action("send", HASH_FORMAT_SHORT " (blk) to [%s]",
+                    HASH_SHORT(hsh), peer->name);
                 break;
             }
             default:
@@ -1788,10 +1862,8 @@ static bool handle_getdata(struct peer *peer, struct table *table)
                 break;
         }
         deref_data(table, hsh);
-        if (!ok)
-            return false;
     }
-    return true;
+    return ok;
 }
 
 static bool handle_getheaders(struct peer *peer, struct table *table)
@@ -1814,59 +1886,7 @@ static bool handle_getheaders(struct peer *peer, struct table *table)
 
 static bool handle_headers(struct peer *peer, struct table *table)
 {
-    struct buf *buf = peer->in_buf;
-    size_t count = pop_varint(buf);
-    static size_t MAX_COUNT = 2000;
-    if (count < 1 || count > MAX_COUNT)
-    {
-        warning("[%s] count is out-of-range for headers", peer->name);
-        return false;
-    }
-    struct block block = pop(buf, struct block);
-    uint256_t hsh = block.prev_block;
-    uint256_t req_hsh = hsh;
-    ssize_t idx = del_proxy(table, GET_HEADERS, req_hsh);
-    if (idx < 0)
-        return true;
-    size_t zero = pop_varint(buf);
-    if (zero != 0)
-    {
-bad_block:
-        warning("[%s] invalid block header (expected zero length)",
-            peer->name);
-        return false;
-    }
-    count--;
-    hsh = hash(&block, sizeof(block));
-    for (size_t i = 0; i < count; i++)
-    {
-        block = pop(buf, struct block);
-        zero = pop_varint(buf);
-        if (zero != 0)
-            goto bad_block;
-        if (memcmp(&block.prev_block, &hsh, sizeof(uint256_t)) != 0)
-        {
-            warning("[%s] invalid block header sequence (not a chain)",
-                peer->name);
-            return false;
-        }
-        hsh = hash(&block, sizeof(block));
-    }
-
-    push_buf(peer->out_buf, buf);
-    struct peer *p = get_peer(table, idx);
-    if (p != NULL && p != peer)
-    {
-        action("complete", "getheaders " HASH_FORMAT " from [%s] to [%s]",
-            HASH(req_hsh), p->name, peer->name);
-        send_message_data(p, peer->out_buf);
-    }
-    else
-        warning("[%s] unable to complete getheaders proxy request",
-            peer->name);
-    deref_peer(p);
-    reset_buf(peer->out_buf);
-    return true;
+    return true;        // TODO: re-implement
 }
 
 static bool handle_version(struct peer *peer, struct table *table, size_t len)
@@ -1894,7 +1914,9 @@ static bool handle_version(struct peer *peer, struct table *table, size_t len)
     }
     pop(buf, uint64_t);       // addr_recv
     struct in6_addr addr = pop(buf, struct in6_addr);
-    bool relay = set_my_addr(addr);
+    bool relay = false;
+    if (peer->outbound)
+        relay = set_my_addr(addr);
     pop(buf, uint16_t);
     pop(buf, uint64_t);       // addr_from
     pop(buf, struct in6_addr);
@@ -1904,7 +1926,8 @@ static bool handle_version(struct peer *peer, struct table *table, size_t len)
     action("connect", "peer [%s] of type \"%s\"", peer->name, agent);
     mem_free(agent);
     int32_t h = pop(buf, uint32_t);
-    set_height(h);
+    if (peer->outbound)
+        set_height(h);
     bool use_relay = false;
     if (USE_RELAY && !is_empty(buf))
         use_relay = true;
@@ -1949,6 +1972,8 @@ static bool process_message(struct peer *peer, struct table *table)
         ok = handle_getheaders(peer, table);
     else if (strcmp(hdr.command, "headers") == 0)
         ok = handle_headers(peer, table);
+    else if (strcmp(hdr.command, "notfound") == 0)
+        ok = handle_notfound(peer, table);
     else if (strcmp(hdr.command, "ping") == 0)
     {
         uint64_t nonce = pop(buf, uint64_t);
@@ -2267,10 +2292,6 @@ static void *bootstrap(void *arg)
                 info = info->ai_next;
                 continue;
             }
-
-            char name[INET6_ADDRSTRLEN+1];
-            inet_ntop(AF_INET6, &addr, name, sizeof(name));
-            action("found", "address [%s] from %s", name, seed);
             i++;
             time_t addr_time = curr_time - rand64() % 3000;
             insert_address(table, addr, addr_time);
@@ -2289,9 +2310,10 @@ static void *bootstrap(void *arg)
 #define OPTION_HELP         3
 #define OPTION_MAX_PEERS    4
 #define OPTION_PEER         5
-#define OPTION_SERVER       6
-#define OPTION_STEALTH      7
-#define OPTION_THRESHOLD    8
+#define OPTION_PREFETCH     6
+#define OPTION_SERVER       7
+#define OPTION_STEALTH      8
+#define OPTION_THRESHOLD    9
 
 int main(int argc, char **argv)
 {
@@ -2320,6 +2342,7 @@ int main(int argc, char **argv)
         {"help",      0, 0, OPTION_HELP},
         {"max-peers", 1, 0, OPTION_MAX_PEERS},
         {"peer",      1, 0, OPTION_PEER},
+        {"prefetch",  0, 0, OPTION_PREFETCH},
         {"server",    0, 0, OPTION_SERVER},
         {"stealth",   0, 0, OPTION_STEALTH},
         {"threshold", 1, 0, OPTION_THRESHOLD}
@@ -2369,7 +2392,7 @@ int main(int argc, char **argv)
             }
             case OPTION_MAX_PEERS:
                 MAX_OUTBOUND_PEERS = atoi(optarg);
-                if (MAX_OUTBOUND_PEERS < 1 || MAX_OUTBOUND_PEERS > 512)
+                if (MAX_OUTBOUND_PEERS < 1 || MAX_OUTBOUND_PEERS > 64)
                     fatal("maximum peers is out of range");
                 break;
             case OPTION_SERVER:
@@ -2378,6 +2401,9 @@ int main(int argc, char **argv)
             case OPTION_STEALTH:
                 STEALTH = true;
                 break;
+            case OPTION_PREFETCH:
+                PREFETCH = true;
+                break;
             case OPTION_THRESHOLD:
                 THRESHOLD = atoi(optarg);
                 break;
@@ -2385,7 +2411,8 @@ int main(int argc, char **argv)
             default:
                 fprintf(stderr, "usage: %s [--help] [--client=NAME] "
                     "[--threshold=VAL] [--server] [--stealth] [--peer=PEER] "
-                    "[--max-peers=MAX_PEERS] [--coin=COIN]\n\n", argv[0]);
+                    "[--prefetch] [--max-peers=MAX_PEERS] [--coin=COIN]\n\n",
+                    argv[0]);
                 fprintf(stderr, "WHERE:\n");
                 fprintf(stderr, "\t--client=CLIENT\n");
                 fprintf(stderr, "\t\tUse CLIENT as the client name "
@@ -2400,10 +2427,13 @@ int main(int argc, char **argv)
                 fprintf(stderr, "\t--max-peers=MAX_PEERS\n");
                 fprintf(stderr, "\t\tMaximum outbound connections "
                     "(default=8).\n");
-                fprintf(stderr, "\t--sever\n");
+                fprintf(stderr, "\t--server\n");
                 fprintf(stderr, "\t\tRun as a server (default=false).\n");
                 fprintf(stderr, "\t--stealth\n");
                 fprintf(stderr, "\t\tIdentify as a normal client "
+                    "(default=false).\n");
+                fprintf(stderr, "\t--prefetch\n");
+                fprintf(stderr, "\t\tPrefetch tx and block data "
                     "(default=false).\n");
                 fprintf(stderr, "\t--coin=COIN\n");
                 fprintf(stderr, "\t\tAttach to COIN network "
