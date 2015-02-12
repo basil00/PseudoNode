@@ -1452,6 +1452,8 @@ static void fetch(struct table *table, struct peer *peer,
         p = get_peer(table, idx);
         if (p != NULL && p != peer)
             found = true;
+        if (p == peer)
+            deref_peer(p);
     }
     if (!found)
     {
@@ -1463,6 +1465,7 @@ static void fetch(struct table *table, struct peer *peer,
     make_getdata(peer, type, hsh);
     finalize_message(peer->out_buf);
     send_message_data(p, peer->out_buf);
+    deref_peer(p);
     reset_buf(peer->out_buf);
 }
 
@@ -1601,6 +1604,7 @@ static bool handle_notfound(struct peer *peer, struct table *table)
                     p->name);
                 send_message_data(p, peer->out_buf);
             }
+            deref_peer(p);
             delays = delays->next;
             mem_free(d);
         }
@@ -1634,6 +1638,7 @@ static bool handle_tx(struct peer *peer, struct table *table, size_t len)
                 HASH_SHORT(tx_hsh), p->name);
             send_message_data(p, peer->out_buf);
         }
+        deref_peer(p);
         delays = delays->next;
         mem_free(d);
     }
@@ -1747,6 +1752,7 @@ static bool handle_block(struct peer *peer, struct table *table, uint32_t len)
                 HASH_SHORT(blk_hsh), p->name);
             send_message_data(p, peer->out_buf);
         }
+        deref_peer(p);
         delays = delays->next;
         mem_free(d);
     }
