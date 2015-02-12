@@ -103,8 +103,6 @@ TODOs
 
 PseudoNode is currently alpha quality software.  Some ideas for future work:
 
-* Automatic port mapping with UPnP.
-* MacOSX support.
 * Bloom filters.
 * Mining support?  However without the UTXO set only empty blocks can be
   safely mined.

@@ -35,6 +35,12 @@
 #include <pwd.h>
 #include <pthread.h>
 
+#ifdef MACOSX
+#define s6_addr16       __u6_addr.__u6_addr16
+#define MSG_NOSIGNAL    0
+#define MAP_ANONYMOUS   MAP_ANON
+#endif
+
 static bool use_color = false;
 
 #define color_clear(stream)         if (use_color) fputs("\33[0m", stream)

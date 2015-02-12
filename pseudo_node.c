@@ -136,6 +136,10 @@ const struct coin_info flappycoin =
 
 static uint64_t rand64(void);
 
+#ifdef MACOSX
+#define LINUX
+#endif
+
 #ifdef LINUX
 #include "linux.c"
 #endif
@@ -2311,6 +2315,8 @@ static void *bootstrap(void *arg)
     return NULL;
 }
 
+#include "port_map.c"
+
 #define OPTION_CLIENT       1
 #define OPTION_COIN         2
 #define OPTION_HELP         3
@@ -2461,9 +2467,7 @@ int main(int argc, char **argv)
     memset(&myaddr, 0, sizeof(myaddr));
     myaddr_0 = myaddr_1 = myaddr;
 
-    action("NOTE", "open port %u for inbound connections", ntohs(PORT));
-    msleep(250);
-
+    spawn_thread(port_map, NULL);
     if (!spawn_thread(bootstrap, (void *)table))
         fatal("failed to spawn bootstrap thread: %s", get_error());
     manager(table);
