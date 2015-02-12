@@ -131,8 +131,9 @@ const struct coin_info flappycoin =
 #define TX                          1
 #define BLOCK                       2
 #define ADDRESS                     3
-#define PEER                        4
-#define QUEUE                       5
+#define HEADERS                     4
+#define PEER                        5
+#define QUEUE                       6
 
 static uint64_t rand64(void);
 
@@ -421,6 +422,7 @@ static void mem_free(void *ptr)
 static uint64_t addr_salt;
 static uint64_t peer_salt;
 static uint64_t queue_salt;
+static uint64_t headers_salt;
 
 extern void sha256(const void *data, size_t len, void *res);
 static uint256_t hash(const void *data, size_t len)
@@ -450,6 +452,12 @@ static uint256_t queue_hash(size_t idx)
 {
     size_t key[2] = {queue_salt, idx};
     return hash(key, sizeof(key));
+}
+
+static uint256_t headers_hash(uint256_t hsh)
+{
+    hsh.i64[0] ^= headers_salt;
+    return hash(&hsh, sizeof(hsh));
 }
 
 /****************************************************************************/
@@ -942,6 +950,9 @@ static void garbage_collect(struct table *table)
                 case TX:
                     del = (entry->state != FETCHING || diff > 5);
                     num_tx += del;
+                    break;
+                case HEADERS:
+                    del = (diff > 10);
                     break;
                 case BLOCK:
                     del = (diff > 150);
@@ -1440,32 +1451,40 @@ static void relay_address(struct table *table, struct peer *peer,
     reset_buf(peer->out_buf);
 }
 
-static void fetch(struct table *table, struct peer *peer,
-    bool any, uint32_t type, uint256_t hsh)
+static struct peer *find(struct table *table, struct peer *peer,
+    bool any, uint256_t hsh)
 {
     // Find a suitable peer:
     uint64_t mask = (any? UINT64_MAX: get_vote_mask(table, hsh));
     size_t offset = rand64();
-    bool found = false;
     struct peer *p = NULL;
-    for (size_t i = 0; !found && i < MAX_OUTBOUND_PEERS; i++)
+    for (size_t i = 0; (p == NULL) && i < MAX_OUTBOUND_PEERS; i++)
     {
         size_t idx = (i + offset) % MAX_OUTBOUND_PEERS;
         if (((1 << idx) & mask) == 0)
             continue;
         p = get_peer(table, idx);
-        if (p != NULL && p != peer)
-            found = true;
         if (p == peer)
+        {
             deref_peer(p);
+            p = NULL;
+        }
+        else if (p != NULL)
+            break;
     }
-    if (!found)
+    return p;
+}
+
+static void fetch(struct table *table, struct peer *peer,
+    bool any, uint32_t type, uint256_t hsh)
+{
+    struct peer *p = find(table, peer, any, hsh);
+    if (p == NULL)
     {
-        warning("failed to fetch " HASH_FORMAT_SHORT "; no suitable peer",
-            HASH_SHORT(hsh));
+        warning("[%s] failed to fetch " HASH_FORMAT_SHORT "; no suitable peer",
+            peer->name, HASH_SHORT(hsh));
         return;
     }
-
     make_getdata(peer, type, hsh);
     finalize_message(peer->out_buf);
     send_message_data(p, peer->out_buf);
@@ -1473,10 +1492,24 @@ static void fetch(struct table *table, struct peer *peer,
     reset_buf(peer->out_buf);
 }
 
-static bool proxy_getheaders(struct table *table, struct peer *peer,
-    struct buf *buf, uint256_t hsh)
+static void wake(struct table *table, uint256_t hsh, struct buf *buf,
+    const char *type)
 {
-    return false;       // TODO: re-implement
+    struct delay *delays = get_delays(table, hsh);
+    while (delays != NULL)
+    {
+        struct delay *d = delays;
+        struct peer *p = get_peer(table, d->index);
+        if (p != NULL)
+        {
+            action("send", HASH_FORMAT_SHORT " (%s) to [%s]", HASH_SHORT(hsh),
+                type, p->name);
+            send_message_data(p, buf);
+        }
+        deref_peer(p);
+        delays = delays->next;
+        mem_free(d);
+    }
 }
 
 static bool insert_address(struct table *table, struct in6_addr addr,
@@ -1626,26 +1659,9 @@ static bool handle_tx(struct peer *peer, struct table *table, size_t len)
     if (get_vote(table, tx_hsh) == 0)
         return true;
 
-    struct delay *delays = get_delays(table, tx_hsh);
-    if (delays != NULL)
-    {
-        make_tx(peer, tx, len);
-        finalize_message(peer->out_buf);
-    }
-    while (delays != NULL)
-    {
-        struct delay *d = delays;
-        struct peer *p = get_peer(table, d->index);
-        if (p != NULL && p != peer)
-        {
-            action("send", HASH_FORMAT_SHORT " (tx) to [%s]",
-                HASH_SHORT(tx_hsh), p->name);
-            send_message_data(p, peer->out_buf);
-        }
-        deref_peer(p);
-        delays = delays->next;
-        mem_free(d);
-    }
+    make_tx(peer, tx, len);
+    finalize_message(peer->out_buf);
+    wake(table, tx_hsh, peer->out_buf, "tx");
     reset_buf(peer->out_buf);
 
     // Cache tx
@@ -1740,26 +1756,9 @@ static bool handle_block(struct peer *peer, struct table *table, uint32_t len)
         return false;
     }
 
-    struct delay *delays = get_delays(table, blk_hsh);
-    if (delays != NULL)
-    {
-        make_block(peer, block, len);
-        finalize_message(peer->out_buf);
-    }
-    while (delays != NULL)
-    {
-        struct delay *d = delays;
-        struct peer *p = get_peer(table, d->index);
-        if (p != NULL && p != peer)
-        {
-            action("send", HASH_FORMAT_SHORT " (blk) to [%s]",
-                HASH_SHORT(blk_hsh), p->name);
-            send_message_data(p, peer->out_buf);
-        }
-        deref_peer(p);
-        delays = delays->next;
-        mem_free(d);
-    }
+    make_block(peer, block, len);
+    finalize_message(peer->out_buf);
+    wake(table, blk_hsh, peer->out_buf, "blk");
     reset_buf(peer->out_buf);
 
     // Cache recent blocks:
@@ -1890,13 +1889,85 @@ static bool handle_getheaders(struct peer *peer, struct table *table)
     uint256_t hsh = pop(buf, uint256_t);
     for (size_t i = 0; i < count; i++)
         pop(buf, uint256_t);
-    proxy_getheaders(table, peer, buf, hsh);
+    hsh = headers_hash(hsh);
+    insert(table, hsh, HEADERS, peer->index);
+
+    unsigned state = get_state(table, hsh);
+    retry:
+    switch (state)
+    {
+        case OBSERVED:
+            state = set_state(table, hsh, FETCHING);
+            if (state != OBSERVED)
+                goto retry;
+            set_delay(table, hsh, peer->index);
+            break;
+        case FETCHING:
+            set_delay(table, hsh, peer->index);
+            return true;
+        default:
+            return true;    // Should never happen.
+    }
+
+    struct peer *p = find(table, peer, true, hsh);
+    if (p == NULL)
+    {
+        warning("[%s] failed to forward getheaders request; no suitable peer",
+            peer->name);
+        delete(table, hsh);
+        return false;
+    }
+    push_buf(peer->out_buf, buf);
+    send_message_data(p, peer->out_buf);
+    deref_peer(p);
+    reset_buf(peer->out_buf);
     return true;
 }
 
 static bool handle_headers(struct peer *peer, struct table *table)
 {
-    return true;        // TODO: re-implement
+    struct buf *buf = peer->in_buf;
+    size_t count = pop_varint(buf);
+    static size_t MAX_COUNT = 2000;
+    if (count < 1 || count > MAX_COUNT)
+    {
+        warning("[%s] count is out-of-range for headers", peer->name);
+        return false;
+    }
+    struct block block = pop(buf, struct block);
+    uint256_t hsh = block.prev_block;
+    uint256_t req_hsh = headers_hash(hsh);
+
+    size_t zero = pop_varint(buf);
+    if (zero != 0)
+    {
+bad_block:
+        warning("[%s] invalid block header (expected zero length)",
+            peer->name);
+        return false;
+    }
+    count--;
+    hsh = hash(&block, sizeof(block));
+    for (size_t i = 0; i < count; i++)
+    {
+        block = pop(buf, struct block);
+        zero = pop_varint(buf);
+        if (zero != 0)
+            goto bad_block;
+        if (memcmp(&block.prev_block, &hsh, sizeof(uint256_t)) != 0)
+        {
+            warning("[%s] invalid block header sequence (not a chain)",
+                peer->name);
+            return false;
+        }
+        hsh = hash(&block, sizeof(block));
+    }
+
+    push_buf(peer->out_buf, buf);
+    wake(table, req_hsh, peer->out_buf, "hdrs");
+    delete(table, req_hsh);
+    reset_buf(peer->out_buf);
+    return true;
 }
 
 static bool handle_version(struct peer *peer, struct table *table, size_t len)
@@ -2342,9 +2413,10 @@ int main(int argc, char **argv)
     if (!system_init())
         fatal("OS-dependant init failed");
     rand64_init();
-    addr_salt = (uint32_t)rand64();
-    peer_salt = (uint32_t)rand64();
-    queue_salt = (uint32_t)rand64();
+    addr_salt = rand64();
+    peer_salt = rand64();
+    queue_salt = rand64();
+    headers_salt = rand64();
     struct table *table = alloc_table();
    
     static struct option long_options[] =
