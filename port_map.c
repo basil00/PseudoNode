@@ -22,7 +22,7 @@
  */
 
 #ifdef WINDOWS
-#define LIB_NAME            "libminiupnpc.dll"
+#define LIB_NAME            "miniupnpc.dll"
 #endif
 
 #ifdef LINUX

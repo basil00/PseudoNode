@@ -7,6 +7,7 @@ CLIBS = -lpthread -ldl
 pseudonode: $(OBJS)
 	$(CC) $(CFLAGS) -o pseudonode $(OBJS) $(CLIBS)
 	$(STRIP) pseudonode
+	cp pseudonode pseudonode.linux
 
 clean:
 	rm -f $(OBJS) pseduonode
