@@ -97,6 +97,59 @@ static inline void msleep(size_t ms)
     usleep(ms * 1000);
 }
 
+// Implementation of Windows-style events in pthreads:
+struct event
+{
+    pthread_mutex_t mutex;
+    pthread_cond_t cond;
+    bool set;
+};
+typedef struct event event;
+
+static void event_init(event *e)
+{
+    mutex_init(&e->mutex);
+    int res = pthread_cond_init(&e->cond, NULL);
+    assert(res == 0);
+    e->set = false;
+}
+
+static bool event_wait(event *e)
+{
+    struct timespec ts;
+    ts.tv_sec  = 1;
+    ts.tv_nsec = rand64() % 1000000000;
+    mutex_lock(&e->mutex);
+    while (!e->set)
+    {
+        int res = pthread_cond_timedwait(&e->cond, &e->mutex, &ts);
+        if (res == ETIMEDOUT)
+        {
+            mutex_unlock(&e->mutex);
+            return false;
+        }
+    }
+    e->set = false;
+    mutex_unlock(&e->mutex);
+    return true;
+}
+
+static void event_set(event *e)
+{
+    mutex_lock(&e->mutex);
+    e->set = true;
+    mutex_unlock(&e->mutex);
+    int res = pthread_cond_signal(&e->cond);
+    assert(res == 0);
+}
+
+static inline void event_free(event *e)
+{
+    mutex_free(&e->mutex);
+    int res = pthread_cond_destroy(&e->cond);
+    assert(res == 0);
+}
+
 #define ref(addr)               \
     __sync_fetch_and_add((addr), 1)
 #define deref(addr)             \
@@ -118,12 +171,6 @@ static sock socket_open(bool nonblock)
         return INVALID_SOCKET;
     int on = 1;
     setsockopt(s, SOL_SOCKET, SO_REUSEADDR, (char *)&on, sizeof(on));
-    int flags = fcntl(s, F_GETFL, 0);
-    if (flags < 0 || fcntl(s, F_SETFL, O_NONBLOCK) != 0)
-    {
-        close(s);
-        return INVALID_SOCKET;
-    }
     return s;
 }
 
@@ -161,10 +208,14 @@ static bool socket_connect(sock s, struct in6_addr addr)
     sockaddr.sin6_family = AF_INET6;
     sockaddr.sin6_port = PORT;
     sockaddr.sin6_addr = addr;
+    int flags = fcntl(s, F_GETFL, 0);
+    if (flags < 0 || fcntl(s, F_SETFL, (flags | O_NONBLOCK)) != 0)
+        return false;
     if (connect(s, (struct sockaddr *)&sockaddr, sizeof(sockaddr)) < 0 &&
             errno != EINPROGRESS)
         return false;
-
+    if (fcntl(s, F_SETFL, flags) != 0)
+        return false;
     struct timeval tv;
     tv.tv_sec = 5;
     tv.tv_usec = rand64() % 1000000;
@@ -181,7 +232,7 @@ static ssize_t socket_recv(sock s, void *buf, size_t len, bool *timeout)
 {
     *timeout = false;
     struct timeval tv;
-    tv.tv_sec = 5;
+    tv.tv_sec = 1;
     tv.tv_usec = rand64() % 1000000;
     fd_set fds;
     FD_ZERO(&fds);
@@ -199,7 +250,14 @@ static ssize_t socket_recv(sock s, void *buf, size_t len, bool *timeout)
 
 static ssize_t socket_send(sock s, void *buf, size_t len)
 {
-    return send(s, buf, len, MSG_DONTWAIT | MSG_NOSIGNAL);
+    for (size_t i = 0; i < len; )
+    {
+        int r = send(s, buf+i, len-i, MSG_NOSIGNAL);
+        if (r <= 0)
+            return r;
+        i += r;
+    }
+    return len;
 }
 
 static void socket_close(sock s)

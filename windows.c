@@ -119,6 +119,34 @@ static inline void msleep(size_t ms)
     Sleep(ms);
 }
 
+typedef HANDLE event;
+
+static inline void event_init(event *e)
+{
+    *e = CreateEvent(NULL, FALSE, FALSE, NULL);
+    assert(*e != NULL);
+}
+
+static bool event_wait(event *e)
+{
+    DWORD i = WaitForSingleObject(*e, 1000 + rand64() % 1000);
+    if (i == WAIT_TIMEOUT)
+        return false;
+    assert(i == WAIT_OBJECT_0);
+    return true;
+}
+
+static inline void event_set(event *e)
+{
+    BOOL res = SetEvent(*e);
+    assert(res);
+}
+
+static inline void event_free(event *e)
+{
+    CloseHandle(*e);
+}
+
 #define ref(addr)               \
     __sync_fetch_and_add((addr), 1)
 #define deref(addr)             \
@@ -139,12 +167,6 @@ static sock socket_open(bool nonblock)
     sock s = socket(AF_INET6, SOCK_STREAM, IPPROTO_TCP);
     if (s == INVALID_SOCKET)
         return INVALID_SOCKET;
-    unsigned long on = 1;
-    if (ioctlsocket(s, FIONBIO, &on) != 0)
-    {
-        closesocket(s);
-        return INVALID_SOCKET;
-    }
     unsigned off = 0;
     if (setsockopt(s, IPPROTO_IPV6, IPV6_V6ONLY, (char *)&off,
             sizeof(off)) != 0)
@@ -152,6 +174,7 @@ static sock socket_open(bool nonblock)
         closesocket(s);
         return INVALID_SOCKET;
     }
+    unsigned on = 1;
     setsockopt(s, SOL_SOCKET, SO_REUSEADDR, (char *)&on, sizeof(on));
     return s;
 }
@@ -190,8 +213,14 @@ static bool socket_connect(sock s, struct in6_addr addr)
     sockaddr.sin6_family = AF_INET6;
     sockaddr.sin6_port = PORT;
     sockaddr.sin6_addr = addr;
+    unsigned long on = 1;
+    if (ioctlsocket(s, FIONBIO, &on) != 0)
+        return false;
     if (connect(s, (struct sockaddr *)&sockaddr, sizeof(sockaddr)) != 0 &&
             WSAGetLastError() != WSAEWOULDBLOCK)
+        return false;
+    unsigned long off = 0;
+    if (ioctlsocket(s, FIONBIO, &off) != 0)
         return false;
 
     struct timeval tv;
@@ -210,7 +239,7 @@ static ssize_t socket_recv(sock s, void *buf, size_t len, bool *timeout)
 {
     *timeout = false;
     struct timeval tv;
-    tv.tv_sec = 5;
+    tv.tv_sec = 1;
     tv.tv_usec = rand64() % 1000000;
     fd_set fds;
     FD_ZERO(&fds);
@@ -228,7 +257,14 @@ static ssize_t socket_recv(sock s, void *buf, size_t len, bool *timeout)
 
 static ssize_t socket_send(sock s, void *buf, size_t len)
 {
-    return send(s, buf, len, 0);
+    for (size_t i = 0; i < len; )
+    {
+        int r = send(s, buf+i, len-i, 0);
+        if (r <= 0)
+            return r;
+        i += r;
+    }
+    return len;
 }
 
 static void socket_close(sock s)

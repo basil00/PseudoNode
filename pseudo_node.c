@@ -191,15 +191,24 @@ struct buf
     char *data;
     uint32_t ptr;
     uint32_t len;
+    int32_t ref_count;
+};
+
+struct msg
+{
+    struct buf *buf;
+    struct msg *next;
 };
 
 struct peer
 {
     sock sock;
+    mutex lock;
+    event event;
     uint32_t height;
     int32_t ref_count;
-    struct buf *in_buf;
-    struct buf *out_buf;
+    struct buf *buf;
+    struct msg *msgs;
     time_t alive;
     struct in6_addr to_addr;
     in_port_t to_port;
@@ -255,6 +264,7 @@ struct info
 #define AVAILABLE       3
 
 static void deref_peer(struct peer *peer);
+static void finalize_message(struct buf *buf);
 
 /****************************************************************************/
 
@@ -405,7 +415,7 @@ static void mem_free(void *ptr)
         return;
     struct mem *mem = (struct mem *)ptr;
     mem = mem - 1;
-    size_t size = mem->size;
+    unsigned size = mem->size;
     if (size < MAX_SMALL_ALLOC)
         free(mem);
     else
@@ -494,10 +504,11 @@ static struct buf *alloc_buf(struct peer *peer)
     struct buf *buf = (struct buf *)mem_alloc(sizeof(struct buf));
     size_t len = BUFFER_SIZE;
     char *data = (char *)mem_alloc(len);
-    buf->peer = peer;
-    buf->data = data;
-    buf->len  = len;
-    buf->ptr  = 0;
+    buf->peer      = peer;
+    buf->data      = data;
+    buf->len       = len;
+    buf->ptr       = 0;
+    buf->ref_count = 1;
     return buf;
 }
 
@@ -512,8 +523,20 @@ static void reset_buf(struct buf *buf)
     buf->ptr = 0;
 }
 
-static void free_buf(struct buf *buf)
+static void ref_buf(struct buf *buf)
 {
+    if (buf == NULL)
+        return;
+    ref(&buf->ref_count);
+}
+
+static void deref_buf(struct buf *buf)
+{
+    if (buf == NULL)
+        return;
+    ssize_t ref_count = deref(&buf->ref_count);
+    if (ref_count > 1)
+        return;
     mem_free(buf->data);
     mem_free(buf);
 }
@@ -1161,10 +1184,9 @@ static ssize_t get_free_idx(struct table *table, bool inbound)
 /****************************************************************************/
 // Make messages:
 
-static void make_version(struct peer *peer, uint64_t nonce, uint32_t height,
-    bool use_relay)
+static void make_version(struct buf *buf, struct peer *peer, uint64_t nonce,
+    uint32_t height, bool use_relay)
 {
-    struct buf *buf = peer->out_buf;
     struct header hdr = {MAGIC, "version", 0, 0};
     push(buf, hdr);
     uint32_t version = PROTOCOL_VERSION;
@@ -1187,81 +1209,98 @@ static void make_version(struct peer *peer, uint64_t nonce, uint32_t height,
         uint8_t relay = 1;
         push(buf, relay);
     }
+    finalize_message(buf);
 }
 
-static void make_verack(struct peer *peer)
+static void make_verack(struct buf *buf)
 {
     struct header hdr = {MAGIC, "verack", 0, 0};
-    push(peer->out_buf, hdr);
+    push(buf, hdr);
+    finalize_message(buf);
 }
 
-static void make_addr(struct peer *peer, size_t len, struct buf *data)
+static void make_addr(struct buf *buf, size_t len, struct buf *data)
 {
-    struct buf *buf = peer->out_buf;
     struct header hdr = {MAGIC, "addr", 0, 0};
     push(buf, hdr);
     push_varint(buf, len);
     push_buf(buf, data);
+    finalize_message(buf);
 }
 
-static void make_tx(struct peer *peer, const void *data, size_t len)
+static void make_addr_0(struct buf *buf, uint32_t time, struct in6_addr addr)
 {
-    struct buf *buf = peer->out_buf;
+    struct header hdr = {MAGIC, "addr", 0, 0};
+    push(buf, hdr);
+    push_varint(buf, 1);
+    push(buf, time);
+    uint64_t services = NODE_NETWORK;
+    push(buf, services);
+    push(buf, addr);
+    uint16_t port = PORT;
+    push(buf, port);
+    finalize_message(buf);
+}
+
+static void make_tx(struct buf *buf, const void *data, size_t len)
+{
     struct header hdr = {MAGIC, "tx", 0, 0};
     push(buf, hdr);
     push_data(buf, len, data);
+    finalize_message(buf);
 }
 
-static void make_block(struct peer *peer, const void *data, size_t len)
+static void make_block(struct buf *buf, const void *data, size_t len)
 {
-    struct buf *buf = peer->out_buf;
     struct header hdr = {MAGIC, "block", 0, 0};
     push(buf, hdr);
     push_data(buf, len, data);
+    finalize_message(buf);
 }
 
-static void make_getaddr(struct peer *peer)
+static void make_getaddr(struct buf *buf)
 {
     struct header hdr = {MAGIC, "getaddr", 0, 0};
-    push(peer->out_buf, hdr);
+    push(buf, hdr);
+    finalize_message(buf);
 }
 
-static void make_getdata(struct peer *peer, uint32_t type, uint256_t hsh)
+static void make_getdata(struct buf *buf, uint32_t type, uint256_t hsh)
 {
-    struct buf *buf = peer->out_buf;
     struct header hdr = {MAGIC, "getdata", 0, 0};
     push(buf, hdr);
     push_varint(buf, 1);
     push(buf, type);
     push(buf, hsh);
+    finalize_message(buf);
 }
 
-static void make_inv(struct peer *peer, uint32_t type, uint256_t hsh)
+static void make_inv(struct buf *buf, uint32_t type, uint256_t hsh)
 {
-    struct buf *buf = peer->out_buf;
     struct header hdr = {MAGIC, "inv", 0, 0};
     push(buf, hdr);
     push_varint(buf, 1);
     push(buf, type);
     push(buf, hsh);
+    finalize_message(buf);
 }
 
-static void make_pong(struct peer *peer, uint64_t nonce)
+static void make_pong(struct buf *buf, uint64_t nonce)
 {
-    struct buf *buf = peer->out_buf;
     struct header hdr = {MAGIC, "pong", 0, 0};
     push(buf, hdr);
     push(buf, nonce);
+    finalize_message(buf);
 }
 
-static void make_notfound(struct peer *peer, uint32_t type, uint256_t hsh)
+static void make_notfound(struct buf *buf, uint32_t type, uint256_t hsh)
 {
-    struct buf *buf = peer->out_buf;
     struct header hdr = {MAGIC, "notfound", 0, 0};
     push(buf, hdr);
     push_varint(buf, 1);
     push(buf, type);
     push(buf, hsh);
+    finalize_message(buf);
 }
 
 /****************************************************************************/
@@ -1279,27 +1318,62 @@ static void finalize_message(struct buf *buf)
     hdr->checksum = checksum.i32[0];
 }
 
-// Send message data:
-static bool send_message_data(struct peer *peer, struct buf *buf)
+// Send message handler:
+static void *send_message_worker(void *arg)
 {
-    if (socket_send(peer->sock, buf->data, buf->ptr) < 0)
+    struct peer *peer = (struct peer *)arg;
+
+    while (true)
     {
-        warning("[%s] failed to send message: %s", peer->name, get_error());
-        peer->error = true;
-        return false;
+        if (!event_wait(&peer->event))
+        {
+            // Timeout:
+            if (peer->error)
+            {
+                deref_peer(peer);
+                return NULL;
+            }
+            continue;
+        }
+        while (true)
+        {
+            mutex_lock(&peer->lock);
+            struct msg *msg = peer->msgs;
+            if (msg == NULL)
+            {
+                mutex_unlock(&peer->lock);
+                break;
+            }
+            peer->msgs = msg->next;
+            mutex_unlock(&peer->lock);
+            struct buf *buf = msg->buf;
+            ssize_t len = buf->ptr;
+            ssize_t r = socket_send(peer->sock, buf->data, len);
+            deref_buf(buf);
+            mem_free(msg);
+            if (r != len)
+            {
+                warning("[%s] failed to send message: %s", peer->name,
+                    get_error());
+                peer->error = true;
+                deref_peer(peer);
+                return NULL;
+            }
+        }
     }
-    return true;
 }
 
 // Send a message:
-static bool send_message(struct peer *peer)
+static void send_message(struct peer *peer, struct buf *buf)
 {
-    struct buf *buf = peer->out_buf;
-
-    finalize_message(buf);
-    bool ok = send_message_data(peer, buf);
-    reset_buf(buf);
-    return ok;
+    struct msg *msg = (struct msg *)mem_alloc(sizeof(struct msg));
+    ref_buf(buf);
+    msg->buf = buf;
+    mutex_lock(&peer->lock);
+    msg->next = peer->msgs;
+    peer->msgs = msg;
+    mutex_unlock(&peer->lock);
+    event_set(&peer->event);
 }
 
 // Read message data:
@@ -1342,7 +1416,7 @@ static bool read_message_data(struct peer *peer, char *buf, size_t len)
 // Read a message:
 static bool read_message(struct peer *peer)
 {
-    struct buf *buf = peer->in_buf;
+    struct buf *buf = peer->buf;
     reset_buf(buf);
 
     char hdr0[sizeof(struct header)];
@@ -1398,14 +1472,15 @@ static bool read_message(struct peer *peer)
     return true;
 }
 
-static void relay_message(struct table *table, struct peer *peer)
+static void relay_message(struct table *table, struct peer *peer,
+    struct buf *buf)
 {
     size_t num_peers = get_num_peers();
     for (size_t i = 0; i < num_peers; i++)
     {
         struct peer *p = get_peer(table, i);
         if (p != NULL && p != peer)
-            send_message_data(p, peer->out_buf);
+            send_message(p, buf);
         deref_peer(p);
     }
 }
@@ -1414,20 +1489,20 @@ static void relay_transaction(struct table *table, struct peer *peer,
     uint256_t tx_hsh)
 {
     action("relay", HASH_FORMAT " (tx)", HASH(tx_hsh));
-    make_inv(peer, MSG_TX, tx_hsh);
-    finalize_message(peer->out_buf);
-    relay_message(table, peer);
-    reset_buf(peer->out_buf);
+    struct buf *out = alloc_buf(NULL);
+    make_inv(out, MSG_TX, tx_hsh);
+    relay_message(table, peer, out);
+    deref_buf(out);
 }
 
 static void relay_block(struct table *table, struct peer *peer,
     uint256_t blk_hsh)
 {
     action("relay", HASH_FORMAT " (blk)", HASH(blk_hsh));
-    make_inv(peer, MSG_BLOCK, blk_hsh);
-    finalize_message(peer->out_buf);
-    relay_message(table, peer);
-    reset_buf(peer->out_buf);
+    struct buf *out = alloc_buf(NULL);
+    make_inv(out, MSG_BLOCK, blk_hsh);
+    relay_message(table, peer, out);
+    deref_buf(out);
 }
 
 static void relay_address(struct table *table, struct peer *peer,
@@ -1437,18 +1512,10 @@ static void relay_address(struct table *table, struct peer *peer,
     inet_ntop(AF_INET6, &addr, name, sizeof(name));
     uint16_t port = PORT;
     action("relay", "%s:%u", name, ntohs(port));
-    struct buf *buf = alloc_buf(peer);
-    uint32_t time32 = (uint32_t)time;
-    push(buf, time32);
-    uint64_t services = NODE_NETWORK;
-    push(buf, services);
-    push(buf, addr);
-    push(buf, port);
-    make_addr(peer, 1, buf);
-    free_buf(buf);
-    finalize_message(peer->out_buf);
-    relay_message(table, peer);
-    reset_buf(peer->out_buf);
+    struct buf *out = alloc_buf(NULL);
+    make_addr_0(out, (uint32_t)time, addr);
+    relay_message(table, peer, out);
+    deref_buf(out);
 }
 
 static struct peer *find(struct table *table, struct peer *peer,
@@ -1485,14 +1552,14 @@ static void fetch(struct table *table, struct peer *peer,
             peer->name, HASH_SHORT(hsh));
         return;
     }
-    make_getdata(peer, type, hsh);
-    finalize_message(peer->out_buf);
-    send_message_data(p, peer->out_buf);
+    struct buf *out = alloc_buf(NULL);
+    make_getdata(out, type, hsh);
+    send_message(p, out);
+    deref_buf(out);
     deref_peer(p);
-    reset_buf(peer->out_buf);
 }
 
-static void wake(struct table *table, uint256_t hsh, struct buf *buf,
+static void wake(struct table *table, uint256_t hsh, struct buf *out,
     const char *type)
 {
     struct delay *delays = get_delays(table, hsh);
@@ -1504,7 +1571,7 @@ static void wake(struct table *table, uint256_t hsh, struct buf *buf,
         {
             action("send", HASH_FORMAT_SHORT " (%s) to [%s]", HASH_SHORT(hsh),
                 type, p->name);
-            send_message_data(p, buf);
+            send_message(p, out);
         }
         deref_peer(p);
         delays = delays->next;
@@ -1538,18 +1605,18 @@ static bool have_address(struct table *table, struct in6_addr addr)
 
 static bool handle_addr(struct peer *peer, struct table *table, size_t len)
 {
-    struct buf *buf = peer->in_buf;
+    struct buf *in = peer->buf;
     time_t curr_time = time(NULL);
-    size_t num_addr = pop_varint(buf);
+    size_t num_addr = pop_varint(in);
     const size_t MAX_ADDRESSES = 1000;
     if (num_addr > MAX_ADDRESSES)
         return true;
     for (size_t i = 0; i < num_addr; i++)
     {
-        time_t time = pop(buf, uint32_t);
-        uint64_t services = pop(buf, uint64_t);
-        struct in6_addr addr = pop(buf, struct in6_addr);
-        uint16_t port = pop(buf, uint16_t);
+        time_t time = pop(in, uint32_t);
+        uint64_t services = pop(in, uint64_t);
+        struct in6_addr addr = pop(in, struct in6_addr);
+        uint16_t port = pop(in, uint16_t);
         if ((services & NODE_NETWORK) == 0)
             continue;
         if (port != PORT)
@@ -1566,14 +1633,14 @@ static bool handle_addr(struct peer *peer, struct table *table, size_t len)
 
 static bool handle_inv(struct peer *peer, struct table *table, size_t len)
 {
-    struct buf *buf = peer->in_buf;
-    size_t num_ent = pop_varint(buf);
+    struct buf *in = peer->buf;
+    size_t num_ent = pop_varint(in);
     if (!peer->outbound)    // Inbound peers are not trusted. 
         return true;
     for (size_t i = 0; i < num_ent; i++)
     {
-        uint32_t type = pop(buf, uint32_t);
-        uint256_t hsh = pop(buf, uint256_t);
+        uint32_t type = pop(in, uint32_t);
+        uint256_t hsh = pop(in, uint256_t);
 
         switch (type)
         {
@@ -1618,18 +1685,18 @@ static bool handle_notfound(struct peer *peer, struct table *table)
 {
     if (!peer->outbound)
         return true;
-    struct buf *buf = peer->in_buf;
-    size_t num_ent = pop_varint(buf);
+    struct buf *in = peer->buf;
+    size_t num_ent = pop_varint(in);
     for (size_t i = 0; i < num_ent; i++)
     {
-        uint32_t type = pop(buf, uint32_t);
-        uint256_t hsh = pop(buf, uint256_t);
+        uint32_t type = pop(in, uint32_t);
+        uint256_t hsh = pop(in, uint256_t);
 
         struct delay *delays = get_delays(table, hsh);
         if (delays == NULL)
             continue;
-        make_notfound(peer, type, hsh);
-        finalize_message(peer->out_buf);
+        struct buf *out = alloc_buf(NULL);
+        make_notfound(out, type, hsh);
         while (delays != NULL)
         {
             struct delay *d = delays;
@@ -1639,30 +1706,30 @@ static bool handle_notfound(struct peer *peer, struct table *table)
                 action("notfound", HASH_FORMAT_SHORT " (%s) to [%s]",
                     HASH_SHORT(hsh), (type == MSG_TX? "tx": "blk"),
                     p->name);
-                send_message_data(p, peer->out_buf);
+                send_message(p, out);
             }
             deref_peer(p);
             delays = delays->next;
             mem_free(d);
         }
-        reset_buf(peer->out_buf);
+        deref_buf(out);
     }
     return true;
 }
 
 static bool handle_tx(struct peer *peer, struct table *table, size_t len)
 {
-    struct buf *buf = peer->in_buf;
-    char *tx = pop_data(buf, len);
+    struct buf *in = peer->buf;
+    char *tx = pop_data(in, len);
     uint256_t tx_hsh = hash(tx, len);
 
     if (get_vote(table, tx_hsh) == 0)
         return true;
 
-    make_tx(peer, tx, len);
-    finalize_message(peer->out_buf);
-    wake(table, tx_hsh, peer->out_buf, "tx");
-    reset_buf(peer->out_buf);
+    struct buf *out = alloc_buf(NULL);
+    make_tx(out, tx, len);
+    wake(table, tx_hsh, out, "tx");
+    deref_buf(out);
 
     // Cache tx
     if (!set_data(table, tx_hsh, tx, len))
@@ -1671,38 +1738,38 @@ static bool handle_tx(struct peer *peer, struct table *table, size_t len)
 }
 
 // Calculate the Merkle root.  This is necessary to verify blocks are correct.
-static uint256_t merkle_root(struct buf *buf)
+static uint256_t merkle_root(struct buf *in)
 {
-    size_t len = pop_varint(buf);
-    struct buf *tx_hshs = alloc_buf(buf->peer);
+    size_t len = pop_varint(in);
+    struct buf *tx_hshs = alloc_buf(NULL);
 
     for (size_t i = 0; i < len; i++)
     {
-        size_t ptr0 = buf->ptr;
-        pop(buf, uint32_t);                         // version
+        size_t ptr0 = in->ptr;
+        pop(in, uint32_t);                          // version
         if (coin == &paycoin)
-            pop(buf, uint32_t);                     // time (paycoin)
-        size_t in_len = pop_varint(buf);
+            pop(in, uint32_t);                      // time (paycoin)
+        size_t in_len = pop_varint(in);
         for (size_t j = 0; j < in_len; j++)
         {
-            pop(buf, uint256_t);                    // hash
-            pop(buf, uint32_t);                     // index
-            size_t script_len = pop_varint(buf);
+            pop(in, uint256_t);                     // hash
+            pop(in, uint32_t);                      // index
+            size_t script_len = pop_varint(in);
             for (size_t k = 0; k < script_len; k++)
-                pop(buf, uint8_t);                  // script
-            pop(buf, uint32_t);                     // sequence
+                pop(in, uint8_t);                   // script
+            pop(in, uint32_t);                      // sequence
         }
-        size_t out_len = pop_varint(buf);
+        size_t out_len = pop_varint(in);
         for (size_t j = 0; j < out_len; j++)
         {
-            pop(buf, int64_t);                      // value
-            size_t script_len = pop_varint(buf);
+            pop(in, int64_t);                       // value
+            size_t script_len = pop_varint(in);
             for (size_t k = 0; k < script_len; k++)
-                pop(buf, uint8_t);                  // script
+                pop(in, uint8_t);                   // script
         }
-        pop(buf, uint32_t);                         // lock_time
+        pop(in, uint32_t);                          // lock_time
 
-        uint256_t tx_hsh = hash(buf->data + ptr0, buf->ptr - ptr0);
+        uint256_t tx_hsh = hash(in->data + ptr0, in->ptr - ptr0);
         push(tx_hshs, tx_hsh);
     }
     uint256_t zero;
@@ -1714,7 +1781,10 @@ static uint256_t merkle_root(struct buf *buf)
         for (size_t j = i+1; j < len; j++)
         {
             if (memcmp(hshs+i, hshs+j, sizeof(uint256_t)) == 0)
+            {
+                deref_buf(tx_hshs);
                 return zero;                        // Cause failure.
+            }
         }
     }
     while (len > 1)
@@ -1732,7 +1802,7 @@ static uint256_t merkle_root(struct buf *buf)
         }
     }
     uint256_t root = hshs[0];
-    free_buf(tx_hshs);
+    deref_buf(tx_hshs);
     return root;
 }
  
@@ -1743,12 +1813,12 @@ static bool handle_block(struct peer *peer, struct table *table, uint32_t len)
         warning("[%s] bad block (too small)", peer->name);
         return false;
     }
-    struct buf *buf = peer->in_buf;
-    char *block = pop_data(buf, len);
+    struct buf *in = peer->buf;
+    char *block = pop_data(in, len);
     uint256_t blk_hsh = hash(block, sizeof(struct block));
     struct block *header = (struct block *)block;
-    buf->ptr = sizeof(struct header) + sizeof(struct block);
-    uint256_t root = merkle_root(buf);
+    in->ptr = sizeof(struct header) + sizeof(struct block);
+    uint256_t root = merkle_root(in);
     if (memcmp(&root, &header->merkle_root, sizeof(uint256_t)) != 0)
     {
         mem_free(block);
@@ -1756,10 +1826,10 @@ static bool handle_block(struct peer *peer, struct table *table, uint32_t len)
         return false;
     }
 
-    make_block(peer, block, len);
-    finalize_message(peer->out_buf);
-    wake(table, blk_hsh, peer->out_buf, "blk");
-    reset_buf(peer->out_buf);
+    struct buf *out = alloc_buf(NULL);
+    make_block(out, block, len);
+    wake(table, blk_hsh, out, "blk");
+    deref_buf(out);
 
     // Cache recent blocks:
     time_t curr_time = time(NULL);
@@ -1768,6 +1838,7 @@ static bool handle_block(struct peer *peer, struct table *table, uint32_t len)
     if (diff > 900 || diff < -900)
     {
         // Ignore old block:
+        delete(table, blk_hsh);
         mem_free(block);
         return true;
     }
@@ -1784,27 +1855,30 @@ static bool handle_block(struct peer *peer, struct table *table, uint32_t len)
 static bool handle_getaddr(struct peer *peer, struct table *table)
 {
     static size_t MAX_ADDRESSES = 1000;
-    struct buf *buf = alloc_buf(peer);
-    size_t num_addr = queue_get_addresses(table, buf, MAX_ADDRESSES);
+    struct buf *addrs = alloc_buf(NULL);
+    size_t num_addr = queue_get_addresses(table, addrs, MAX_ADDRESSES);
     if (num_addr == 0)
     {
-        free_buf(buf);
-        return NULL;
+        deref_buf(addrs);
+        return false;
     }
-    make_addr(peer, num_addr, buf);
-    free_buf(buf);
-    return send_message(peer);
+    struct buf *out = alloc_buf(NULL);
+    make_addr(out, num_addr, addrs);
+    deref_buf(addrs);
+    send_message(peer, out);
+    deref_buf(out);
+    return true;
 }
 
 static bool handle_getdata(struct peer *peer, struct table *table)
 {
-    struct buf *buf = peer->in_buf;
-    size_t len = pop_varint(buf);
+    struct buf *in = peer->buf;
+    size_t len = pop_varint(in);
     bool ok = true;
     for (size_t i = 0; ok && i < len; i++)
     {
-        uint32_t type = pop(buf, uint32_t);
-        uint256_t hsh = pop(buf, uint256_t);
+        uint32_t type = pop(in, uint32_t);
+        uint256_t hsh = pop(in, uint256_t);
         unsigned state = get_state(table, hsh);
         size_t data_len = 0;
         void *data = NULL;
@@ -1843,25 +1917,30 @@ static bool handle_getdata(struct peer *peer, struct table *table)
                 // Fall through:
             default:
             not_found:
-                make_notfound(peer, type, hsh);
-                ok = send_message(peer);
+            {
+                struct buf *out = alloc_buf(NULL);
+                make_notfound(out, type, hsh);
+                send_message(peer, out);
+                deref_buf(out);
                 continue;
+            }
         }
 
+        struct buf *out = alloc_buf(NULL);
         switch (type)
         {
             case MSG_TX:
             {
-                make_tx(peer, data, data_len);
-                ok = send_message(peer);
+                make_tx(out, data, data_len);
+                send_message(peer, out);
                 action("send", HASH_FORMAT_SHORT " (tx) to [%s]",
                     HASH_SHORT(hsh), peer->name);
                 break;
             }
             case MSG_BLOCK:
             {
-                make_block(peer, data, data_len);
-                ok = send_message(peer);
+                make_block(out, data, data_len);
+                send_message(peer, out);
                 action("send", HASH_FORMAT_SHORT " (blk) to [%s]",
                     HASH_SHORT(hsh), peer->name);
                 break;
@@ -1870,6 +1949,7 @@ static bool handle_getdata(struct peer *peer, struct table *table)
                 // NYI:
                 break;
         }
+        deref_buf(out);
         deref_data(table, hsh);
     }
     return ok;
@@ -1877,18 +1957,18 @@ static bool handle_getdata(struct peer *peer, struct table *table)
 
 static bool handle_getheaders(struct peer *peer, struct table *table)
 {
-    struct buf *buf = peer->in_buf;
-    pop(buf, uint32_t);
-    size_t count = pop_varint(buf);
+    struct buf *in = peer->buf;
+    pop(in, uint32_t);
+    size_t count = pop_varint(in);
     static size_t MAX_COUNT = 2000;
     if (count < 1 || count > MAX_COUNT)
     {
         warning("[%s] count is out-of-range for getheaders", peer->name);
         return false;
     }
-    uint256_t hsh = pop(buf, uint256_t);
+    uint256_t hsh = pop(in, uint256_t);
     for (size_t i = 0; i < count; i++)
-        pop(buf, uint256_t);
+        pop(in, uint256_t);
     hsh = headers_hash(hsh);
     insert(table, hsh, HEADERS, peer->index);
 
@@ -1917,28 +1997,29 @@ static bool handle_getheaders(struct peer *peer, struct table *table)
         delete(table, hsh);
         return false;
     }
-    push_buf(peer->out_buf, buf);
-    send_message_data(p, peer->out_buf);
+    struct buf *out = alloc_buf(NULL);
+    push_buf(out, in);
+    send_message(p, out);
     deref_peer(p);
-    reset_buf(peer->out_buf);
+    deref_buf(out);
     return true;
 }
 
 static bool handle_headers(struct peer *peer, struct table *table)
 {
-    struct buf *buf = peer->in_buf;
-    size_t count = pop_varint(buf);
+    struct buf *in = peer->buf;
+    size_t count = pop_varint(in);
     static size_t MAX_COUNT = 2000;
     if (count < 1 || count > MAX_COUNT)
     {
         warning("[%s] count is out-of-range for headers", peer->name);
         return false;
     }
-    struct block block = pop(buf, struct block);
+    struct block block = pop(in, struct block);
     uint256_t hsh = block.prev_block;
     uint256_t req_hsh = headers_hash(hsh);
 
-    size_t zero = pop_varint(buf);
+    size_t zero = pop_varint(in);
     if (zero != 0)
     {
 bad_block:
@@ -1950,8 +2031,8 @@ bad_block:
     hsh = hash(&block, sizeof(block));
     for (size_t i = 0; i < count; i++)
     {
-        block = pop(buf, struct block);
-        zero = pop_varint(buf);
+        block = pop(in, struct block);
+        zero = pop_varint(in);
         if (zero != 0)
             goto bad_block;
         if (memcmp(&block.prev_block, &hsh, sizeof(uint256_t)) != 0)
@@ -1963,64 +2044,67 @@ bad_block:
         hsh = hash(&block, sizeof(block));
     }
 
-    push_buf(peer->out_buf, buf);
-    wake(table, req_hsh, peer->out_buf, "hdrs");
+    struct buf *out = alloc_buf(NULL);
+    push_buf(out, in);
+    wake(table, req_hsh, out, "hdrs");
+    deref_buf(out);
     delete(table, req_hsh);
-    reset_buf(peer->out_buf);
     return true;
 }
 
 static bool handle_version(struct peer *peer, struct table *table, size_t len)
 {
-    struct buf *buf = peer->in_buf;
-    uint32_t version = pop(buf, uint32_t);
+    struct buf *in = peer->buf;
+    uint32_t version = pop(in, uint32_t);
     if (version < 70001)
     {
         warning("[%s] ignoring peer (protocol version %u too old)",
             peer->name, version);
         return false;
     }
-    uint64_t services = pop(buf, uint64_t);
+    uint64_t services = pop(in, uint64_t);
     if ((services & NODE_NETWORK) == 0 && peer->outbound)
     {
         warning("[%s] ignoring peer (not a full node)", peer->name);
         return false;
     }
     uint64_t curr_time = time(NULL);
-    uint64_t peer_time = pop(buf, uint64_t);
+    uint64_t peer_time = pop(in, uint64_t);
     if (peer_time < curr_time - 3600 || peer_time > curr_time + 3600)
     {
         warning("[%s] ignoring peer (clock mis-match)", peer->name);
         return false;
     }
-    pop(buf, uint64_t);       // addr_recv
-    struct in6_addr addr = pop(buf, struct in6_addr);
+    pop(in, uint64_t);          // addr_recv
+    struct in6_addr addr = pop(in, struct in6_addr);
     bool relay = false;
     if (peer->outbound)
         relay = set_my_addr(addr);
-    pop(buf, uint16_t);
-    pop(buf, uint64_t);       // addr_from
-    pop(buf, struct in6_addr);
-    pop(buf, uint16_t);
-    pop(buf, uint64_t);       // Nonce
-    char *agent = pop_varstr(buf);
+    pop(in, uint16_t);
+    pop(in, uint64_t);          // addr_from
+    pop(in, struct in6_addr);
+    pop(in, uint16_t);
+    pop(in, uint64_t);          // Nonce
+    char *agent = pop_varstr(in);
     action("connect", "peer [%s] of type \"%s\"", peer->name, agent);
     mem_free(agent);
-    int32_t h = pop(buf, uint32_t);
+    int32_t h = pop(in, uint32_t);
     if (peer->outbound)
         set_height(h);
     bool use_relay = false;
-    if (USE_RELAY && !is_empty(buf))
+    if (USE_RELAY && !is_empty(in))
         use_relay = true;
+    struct buf *out = alloc_buf(NULL);
+    make_verack(out);
+    send_message(peer, out);
+    deref_buf(out);
     if (!peer->outbound)
     {
-        make_version(peer, rand64(), get_height(), use_relay);
-        if (!send_message(peer))
-            return false;
+        struct buf *out = alloc_buf(NULL);
+        make_version(out, peer, rand64(), get_height(), use_relay);
+        send_message(peer, out);
+        deref_buf(out);
     }
-    make_verack(peer);
-    if (!send_message(peer))
-        return false;
     if (relay)
         relay_address(table, peer, time(NULL), addr);
     return true;
@@ -2028,8 +2112,8 @@ static bool handle_version(struct peer *peer, struct table *table, size_t len)
 
 static bool process_message(struct peer *peer, struct table *table)
 {
-    struct buf *buf = peer->in_buf;
-    struct header hdr = pop(buf, struct header);
+    struct buf *in = peer->buf;
+    struct header hdr = pop(in, struct header);
     size_t len = hdr.length;
 
     bool ok = true;
@@ -2057,17 +2141,19 @@ static bool process_message(struct peer *peer, struct table *table)
         ok = handle_notfound(peer, table);
     else if (strcmp(hdr.command, "ping") == 0)
     {
-        uint64_t nonce = pop(buf, uint64_t);
-        make_pong(peer, nonce);
-        ok = send_message(peer);
+        uint64_t nonce = pop(in, uint64_t);
+        struct buf *out = alloc_buf(NULL);
+        make_pong(out, nonce);
+        send_message(peer, out);
+        deref_buf(out);
     }
     else if (strcmp(hdr.command, "filterload") == 0)
         ok = false;         // NYI so drop connection.
     else if (strcmp(hdr.command, "reject") == 0)
     {
-        char *message = pop_varstr(buf);
-        pop(buf, uint8_t);
-        char *reason = pop_varstr(buf);
+        char *message = pop_varstr(in);
+        pop(in, uint8_t);
+        char *reason = pop_varstr(in);
         warning("[%s] message (%s) rejected by peer (%s)", peer->name,
             message, reason);
         mem_free(message);
@@ -2092,12 +2178,14 @@ static struct peer *open_peer(struct table *table, int s, bool outbound,
     inet_ntop(AF_INET6, &addr, name, sizeof(name));
    
     struct peer *peer = (struct peer *)mem_alloc(sizeof(struct peer));
-    peer->in_buf = alloc_buf(peer);
-    peer->out_buf = alloc_buf(peer);
+    peer->buf = alloc_buf(peer);
+    peer->msgs = NULL;
     peer->sock = s;
+    mutex_init(&peer->lock);
+    event_init(&peer->event);
     peer->outbound = outbound;
     peer->error = false;
-    peer->ref_count = 1;
+    peer->ref_count = 2;        // 2 for both threads
     peer->height = 0;
     peer->alive = time(NULL);
     peer->to_addr = addr;
@@ -2108,6 +2196,7 @@ static struct peer *open_peer(struct table *table, int s, bool outbound,
     peer->name = (char *)mem_alloc(strlen(name)+1);
     strcpy(peer->name, name);
     peer->env = NULL;
+    spawn_thread(send_message_worker, (void *)peer);
     set_peer(table, peer->index, peer);
     return peer;
 }
@@ -2120,8 +2209,9 @@ static void deref_peer(struct peer *peer)
     if (ref_count > 1)
         return;
     socket_close(peer->sock);
-    free_buf(peer->in_buf);
-    free_buf(peer->out_buf);
+    mutex_free(&peer->lock);
+    event_free(&peer->event);
+    deref_buf(peer->buf);
     mem_free(peer->name);
     mem_free(peer);
 }
@@ -2129,6 +2219,7 @@ static void deref_peer(struct peer *peer)
 static void close_peer(struct table *table, struct peer *peer)
 {
     del_peer(table, peer->index);
+    peer->error = true;
     deref_peer(peer);
 }
 
@@ -2166,8 +2257,10 @@ static void *inbound_worker(void *arg)
     peer->env = &env;
     if (queue_need_addresses())
     {
-        make_getaddr(peer);
-        send_message(peer);
+        struct buf *out = alloc_buf(NULL);
+        make_getaddr(out);
+        send_message(peer, out);
+        deref_buf(out);
     }
     while (read_message(peer))
     {
@@ -2225,12 +2318,16 @@ static void *outbound_worker(void *arg)
         return NULL;
     }
     peer->env = &env;
-    make_version(peer, rand64(), get_height(), true);
-    send_message(peer);
+    struct buf *out = alloc_buf(NULL);
+    make_version(out, peer, rand64(), get_height(), true);
+    send_message(peer, out);
+    deref_buf(out);
     if (queue_need_addresses())
     {
-        make_getaddr(peer);
-        send_message(peer);
+        struct buf *out = alloc_buf(NULL);
+        make_getaddr(out);
+        send_message(peer, out);
+        deref_buf(out);
     }
     while (read_message(peer))
     {
