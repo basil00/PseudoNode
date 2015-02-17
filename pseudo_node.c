@@ -208,7 +208,8 @@ struct peer
     uint32_t height;
     int32_t ref_count;
     struct buf *buf;
-    struct msg *msgs;
+    struct msg *head;
+    struct msg *tail;
     time_t alive;
     struct in6_addr to_addr;
     in_port_t to_port;
@@ -1338,13 +1339,15 @@ static void *send_message_worker(void *arg)
         while (true)
         {
             mutex_lock(&peer->lock);
-            struct msg *msg = peer->msgs;
+            struct msg *msg = peer->head;
             if (msg == NULL)
             {
                 mutex_unlock(&peer->lock);
                 break;
             }
-            peer->msgs = msg->next;
+            peer->head = msg->next;
+            if (peer->head == NULL)
+                peer->tail = NULL;
             mutex_unlock(&peer->lock);
             struct buf *buf = msg->buf;
             ssize_t len = buf->ptr;
@@ -1369,9 +1372,18 @@ static void send_message(struct peer *peer, struct buf *buf)
     struct msg *msg = (struct msg *)mem_alloc(sizeof(struct msg));
     ref_buf(buf);
     msg->buf = buf;
+    msg->next = NULL;
     mutex_lock(&peer->lock);
-    msg->next = peer->msgs;
-    peer->msgs = msg;
+    if (peer->tail == NULL)
+    {
+        peer->tail = msg;
+        peer->head = msg;
+    }
+    else
+    {
+        peer->tail->next = msg;
+        peer->tail = msg;
+    }
     mutex_unlock(&peer->lock);
     event_set(&peer->event);
 }
@@ -2179,7 +2191,8 @@ static struct peer *open_peer(struct table *table, int s, bool outbound,
    
     struct peer *peer = (struct peer *)mem_alloc(sizeof(struct peer));
     peer->buf = alloc_buf(peer);
-    peer->msgs = NULL;
+    peer->head = NULL;
+    peer->tail = NULL;
     peer->sock = s;
     mutex_init(&peer->lock);
     event_init(&peer->event);
@@ -2211,6 +2224,14 @@ static void deref_peer(struct peer *peer)
     socket_close(peer->sock);
     mutex_free(&peer->lock);
     event_free(&peer->event);
+    struct msg *msg = peer->head;
+    while (msg != NULL)
+    {
+        struct msg *prev = msg;
+        msg = msg->next;
+        deref_buf(prev->buf);
+        mem_free(prev);
+    }
     deref_buf(peer->buf);
     mem_free(peer->name);
     mem_free(peer);
