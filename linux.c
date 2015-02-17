@@ -109,7 +109,11 @@ typedef struct event event;
 static void event_init(event *e)
 {
     mutex_init(&e->mutex);
-    int res = pthread_cond_init(&e->cond, NULL);
+    pthread_condattr_t attr;
+    pthread_condattr_init(&attr);
+    int res = pthread_condattr_setclock(&attr, CLOCK_MONOTONIC);
+    assert(res == 0);
+    res = pthread_cond_init(&e->cond, &attr);
     assert(res == 0);
     e->set = false;
 }
@@ -117,8 +121,10 @@ static void event_init(event *e)
 static bool event_wait(event *e)
 {
     struct timespec ts;
-    ts.tv_sec  = 1;
-    ts.tv_nsec = rand64() % 1000000000;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    ts.tv_nsec += rand64() % 1000000000;
+    ts.tv_sec += 1 + ts.tv_nsec / 1000000000;
+    ts.tv_nsec = ts.tv_nsec % 1000000000;
     mutex_lock(&e->mutex);
     while (!e->set)
     {
