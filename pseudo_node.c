@@ -2648,7 +2648,7 @@ int main(int argc, char **argv)
     if (SERVER)
         server();
     if (USER_AGENT == NULL)
-        USER_AGENT = "/PseudoNode:0.1.0/";
+        USER_AGENT = "/PseudoNode:0.2.0/";
     if (STEALTH)
         USER_AGENT = coin->user_agent;
     if (THRESHOLD < 1 || THRESHOLD > MAX_OUTBOUND_PEERS)

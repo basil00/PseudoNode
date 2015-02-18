@@ -85,6 +85,10 @@ Windows can be built via Linux cross compilation and MinGW.  Run the command:
 
     make -f Makefile.windows
 
+For MacOSX, run the command:
+
+    make -f Makefile.macosx
+
 Technical
 =========
 

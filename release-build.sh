@@ -44,7 +44,7 @@ then
     cp README.md $INSTALL
     echo "\tcopy $INSTALL/psuedonode..."
     cp pseudonode.macosx $INSTALL/pseudonode
-    echo "\tcopy $INSTALL/libminiupnpc.so..."
+    echo "\tcopy $INSTALL/libminiupnpc.dylib..."
     cp libminiupnpc.dylib $INSTALL
     echo "\tbuilding $PACKAGE..."
     zip -r $PACKAGE $INSTALL > /dev/null
@@ -68,7 +68,7 @@ then
     cp README.md $INSTALL
     echo "\tcopy $INSTALL/psuedonode..."
     cp PseudoNode.exe $INSTALL
-    echo "\tcopy $INSTALL/libminiupnpc.so..."
+    echo "\tcopy $INSTALL/miniupnpc.dll..."
     cp miniupnpc.dll $INSTALL
     echo "\tbuilding $PACKAGE..."
     zip -r $PACKAGE $INSTALL > /dev/null
