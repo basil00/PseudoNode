@@ -1,0 +1,14 @@
+CC = clang
+STRIP = strip
+OBJS = pseudo_node.o sha256.o
+CFLAGS = -std=gnu99 -DMACOSX -O2 -Wno-unused-value
+CLIBS = -lpthread
+
+pseudonode: $(OBJS)
+	$(CC) $(CFLAGS) -o pseudonode $(OBJS) $(CLIBS)
+	$(STRIP) pseudonode
+	cp pseudonode pseudonode.macosx
+
+clean:
+	rm -f $(OBJS) pseduonode
+

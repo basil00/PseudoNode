@@ -28,6 +28,7 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/mman.h>
+#include <sys/time.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
@@ -109,10 +110,13 @@ typedef struct event event;
 static void event_init(event *e)
 {
     mutex_init(&e->mutex);
+    int res;
     pthread_condattr_t attr;
     pthread_condattr_init(&attr);
-    int res = pthread_condattr_setclock(&attr, CLOCK_MONOTONIC);
+#ifndef MACOSX
+    res = pthread_condattr_setclock(&attr, CLOCK_MONOTONIC);
     assert(res == 0);
+#endif
     res = pthread_cond_init(&e->cond, &attr);
     assert(res == 0);
     e->set = false;
@@ -121,7 +125,15 @@ static void event_init(event *e)
 static bool event_wait(event *e)
 {
     struct timespec ts;
+#ifndef MACOSX
     clock_gettime(CLOCK_MONOTONIC, &ts);
+#else
+    struct timeval tv;
+    int res = gettimeofday(&tv, NULL);
+    assert(res == 0);
+    ts.tv_sec = tv.tv_sec;
+    ts.tv_nsec = 1000 * tv.tv_usec;
+#endif
     ts.tv_nsec += rand64() % 1000000000;
     ts.tv_sec += 1 + ts.tv_nsec / 1000000000;
     ts.tv_nsec = ts.tv_nsec % 1000000000;
