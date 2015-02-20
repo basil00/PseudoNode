@@ -189,6 +189,7 @@ static sock socket_open(bool nonblock)
         return INVALID_SOCKET;
     int on = 1;
     setsockopt(s, SOL_SOCKET, SO_REUSEADDR, (char *)&on, sizeof(on));
+    setsockopt(s, IPPROTO_TCP, TCP_NODELAY, (char *)&on, sizeof(on));
     return s;
 }
 

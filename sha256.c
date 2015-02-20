@@ -106,7 +106,7 @@ static void sha256_init(SHA256_CTX *ctx)
 
 static void sha256_update(SHA256_CTX *ctx, uint8_t *data, uint32_t len)
 {  
-    uint32_t t,i;
+    uint32_t i;
    
     for (i=0; i < len; ++i)
     { 
@@ -171,7 +171,7 @@ static void sha256_final(SHA256_CTX *ctx, uint8_t *hash)
    }
 }
 
-extern void sha256(const char *data, size_t len, char *res)
+extern void sha256_hash(const char *data, size_t len, char *res)
 {
     SHA256_CTX cxt;
     sha256_init(&cxt);
