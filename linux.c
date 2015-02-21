@@ -182,7 +182,7 @@ static bool spawn_thread(void *(f)(void *), void *arg)
 typedef int sock;
 #define INVALID_SOCKET          (-1)
 
-static sock socket_open(bool nonblock)
+static sock socket_open(void)
 {
     sock s = socket(AF_INET6, SOCK_STREAM, IPPROTO_TCP);
     if (s < 0)

@@ -2612,7 +2612,7 @@ static void close_peer(struct table *table, struct peer *peer)
     peer->error = true;
     deref_peer(peer);
     if (rand64() % 8 != 0)      // Maybe re-use peer?
-        insert_address(table, addr, time(NULL));
+        insert_address(table, addr, time(NULL) - rand64() % 3000);
 }
 
 // Handle a peer.
@@ -2639,7 +2639,7 @@ static void *peer_worker(void *arg)
     if (outbound)
     {
         // Open socket for outbound peer.
-        s = socket_open(false);
+        s = socket_open();
         if (s == INVALID_SOCKET)
         {
             warning("[%s] failed to open socket: %s", name, get_error());
@@ -2717,7 +2717,7 @@ worker_exit:
 // Manage all peers.  Create new connections if necessary.
 static void manager(struct table *table)
 {
-    sock s = socket_open(true);
+    sock s = socket_open();
     if (s == INVALID_SOCKET)
         fatal("failed to create socket: %s", get_error());
     if (!socket_bind(s, PORT))
