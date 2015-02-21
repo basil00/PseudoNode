@@ -1111,7 +1111,8 @@ static void garbage_collect(struct table *table)
                 {
                     // Reset counters.
                     struct peer **wrap = entry->data;
-                    assert(wrap != NULL);
+                    if (wrap == NULL)
+                        break;
                     struct peer *peer = (struct peer *)*wrap;
                     peer->reqs = 0;
                     peer->invs = 0;
@@ -1829,12 +1830,6 @@ static bool insert_address(struct table *table, struct in6_addr addr,
     queue_push_address(table, addr);
 //    action("found", "address [%s]", name);
     return true;
-}
-
-static bool have_address(struct table *table, struct in6_addr addr)
-{
-    uint256_t addr_hsh = addr_hash(addr);
-    return (get_vote(table, addr_hsh) != 0);
 }
 
 /*****************************************************************************/
@@ -2806,7 +2801,7 @@ static void *bootstrap(void *arg)
     memset(&hint, 0, sizeof(hint));
     hint.ai_family = AF_UNSPEC;
     size_t decay = 2;
-    for (size_t i = 0; queue_need_addresses(); )
+    while (queue_need_addresses())
     {
         size_t stagger = rand64() % 100;
         const char *seed = SEEDS[rand64() % SEEDS_LENGTH];
@@ -2845,12 +2840,6 @@ static void *bootstrap(void *arg)
                     info = info->ai_next;
                     continue;
             }
-            if (have_address(table, addr))
-            {
-                info = info->ai_next;
-                continue;
-            }
-            i++;
             time_t addr_time = curr_time - rand64() % 3000;
             insert_address(table, addr, addr_time);
             info = info->ai_next;
