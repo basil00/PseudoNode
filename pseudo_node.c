@@ -584,11 +584,10 @@ static uint64_t rand64(void)
 static struct buf *alloc_buf(jmp_buf *env)
 {
     struct buf *buf = (struct buf *)mem_alloc(sizeof(struct buf));
-    size_t len = BUFFER_SIZE;
-    char *data = (char *)mem_alloc(len);
+    char *data = (char *)mem_alloc(BUFFER_SIZE);
     buf->env       = env;
     buf->data      = data;
-    buf->len       = len;
+    buf->len       = BUFFER_SIZE;
     buf->ptr       = 0;
     buf->ref_count = 1;
     return buf;
@@ -600,9 +599,9 @@ static void reset_buf(struct buf *buf)
     if (buf->len > BUFFER_SIZE)
     {
         mem_free(buf->data);
-        buf->len = BUFFER_SIZE;
-        buf->data = (char *)mem_alloc(buf->len);
+        buf->data = (char *)mem_alloc(BUFFER_SIZE);
     }
+    buf->len = BUFFER_SIZE;
     buf->ptr = 0;
 }
 
