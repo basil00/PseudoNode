@@ -1,4 +1,4 @@
-PseudoNode 0.3
+PseudoNode 0.4
 ==============
 
 When is a full node a full node?
