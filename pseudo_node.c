@@ -763,9 +763,9 @@ static struct table *alloc_table(void)
 }
 
 // Population count (for tallying votes):
-size_t popcount(uint64_t x)
+static size_t tally(uint64_t x)
 {
-    int count;
+    size_t count;
     for (count = 0; x; count++)
         x &= x - 1;
     return count;
@@ -820,8 +820,8 @@ static struct entry *get_entry(struct table *table, uint256_t hsh)
 // initializes a new entry (if one does not already exist), or records the
 // vote for `vote_idx' of an existing entry.  Each index can only vote once.
 // Inbound peers are not allowed to vote to prevent ballot stuffing.
-static size_t vote(struct table *table, uint256_t hsh, unsigned type,
-    uint64_t vote_idx)
+static uint64_t vote(struct table *table, uint256_t hsh, unsigned type,
+    size_t vote_idx)
 {
     if (vote_idx >= MAX_OUTBOUND_PEERS)
         return 0;       // Inbound peers cannot vote.
@@ -835,7 +835,7 @@ static size_t vote(struct table *table, uint256_t hsh, unsigned type,
         entry->vote |= vote;
         size_t new_vote = entry->vote;
         mutex_unlock(&table->lock);
-        return popcount(new_vote);
+        return new_vote;
     }
     else
     {
@@ -855,7 +855,7 @@ static size_t vote(struct table *table, uint256_t hsh, unsigned type,
         table->entries[idx] = entry;
         table->count++;
         mutex_unlock(&table->lock);
-        return 1;
+        return vote;
     }
 }
 
@@ -1006,8 +1006,8 @@ static time_t get_time(struct table *table, uint256_t hsh)
     return time;
 }
 
-// Get the vote mask associated with `hsh'.
-static uint64_t get_vote_mask(struct table *table, uint256_t hsh)
+// Get the vote associated with `hsh'.
+static uint64_t get_vote(struct table *table, uint256_t hsh)
 {
     mutex_lock(&table->lock);
     struct entry *entry = get_entry(table, hsh);
@@ -1017,7 +1017,7 @@ static uint64_t get_vote_mask(struct table *table, uint256_t hsh)
 }
 
 // Get the vote tally associated with `hsh'.
-#define get_vote(table, hsh)    popcount(get_vote_mask((table), (hsh)))
+#define get_tally(table, hsh)    tally(get_vote((table), (hsh)))
 
 // Delay peer with `index' on the arrival of data to `hsh' (via set_data()).
 static void set_delay(struct table *table, uint256_t hsh, size_t idx,
@@ -1650,11 +1650,14 @@ static bool read_message(struct peer *peer, struct buf *in)
 
 // Relay a message to all peers.
 static void relay_message(struct table *table, struct peer *peer,
-    struct buf *buf)
+    uint64_t mask, struct buf *buf)
 {
     size_t num_peers = get_num_peers();
     for (size_t i = 0; i < num_peers; i++)
     {
+        uint64_t bit = (1 << i);
+        if ((bit & mask) != 0)      // Skip if peer already has the data.  
+            continue;
         struct peer *p = get_peer(i, 0);
         if (p != NULL && p != peer && p->ready)
             send_message(p, buf);
@@ -1664,23 +1667,23 @@ static void relay_message(struct table *table, struct peer *peer,
 
 // Relay a transaction.
 static void relay_transaction(struct table *table, struct peer *peer,
-    uint256_t tx_hsh)
+    uint64_t mask, uint256_t tx_hsh)
 {
     action("relay", HASH_FORMAT " (tx)", HASH(tx_hsh));
     struct buf *out = alloc_buf(NULL);
     make_inv(out, MSG_TX, tx_hsh);
-    relay_message(table, peer, out);
+    relay_message(table, peer, mask, out);
     deref_buf(out);
 }
 
 // Relay a block.
 static void relay_block(struct table *table, struct peer *peer,
-    uint256_t blk_hsh)
+    uint64_t mask, uint256_t blk_hsh)
 {
     action("relay", HASH_FORMAT " (blk)", HASH(blk_hsh));
     struct buf *out = alloc_buf(NULL);
     make_inv(out, MSG_BLOCK, blk_hsh);
-    relay_message(table, peer, out);
+    relay_message(table, peer, mask, out);
     deref_buf(out);
 }
 
@@ -1694,7 +1697,7 @@ static void relay_address(struct table *table, struct peer *peer,
     action("relay", "%s:%u", name, ntohs(port));
     struct buf *out = alloc_buf(NULL);
     make_addr_0(out, (uint32_t)time, addr);
-    relay_message(table, peer, out);
+    relay_message(table, peer, 0, out);
     deref_buf(out);
 }
 
@@ -1913,8 +1916,9 @@ static bool handle_inv(struct peer *peer, struct table *table, struct buf *in)
             warning("[%s] NYI inv type (%u)", peer->name, type);
             continue;
         }
-        size_t count = vote(table, hsh, (type == MSG_TX? TX: BLOCK),
+        uint64_t votes = vote(table, hsh, (type == MSG_TX? TX: BLOCK),
             peer->index);
+        size_t count = tally(votes);
         if (count == 1)
         {
             int16_t invs = peer->invs++;
@@ -1930,13 +1934,9 @@ static bool handle_inv(struct peer *peer, struct table *table, struct buf *in)
 
         // Vote threshold reached; take some action.
         if (type == MSG_TX)
-            relay_transaction(table, peer, hsh);
+            relay_transaction(table, peer, votes, hsh);
         else
         {
-            size_t count = vote(table, hsh, BLOCK, peer->index);
-            if (count != THRESHOLD)
-                continue;
-
             // PseudoNode assumes only new blocks are actively advertised.
             // This seems to work well in practice for THRESHOLD >= 2.
             log("----------------------------------NEW BLOCK"
@@ -1945,7 +1945,7 @@ static bool handle_inv(struct peer *peer, struct table *table, struct buf *in)
             garbage_collect(table);             // Clean-up stale data.
             reset_peers();
             queue_shuffle();
-            relay_block(table, peer, hsh);
+            relay_block(table, peer, votes, hsh);
         }
 
         // If enabled, we prefetch data rather than waiting for a node to
@@ -1957,7 +1957,7 @@ static bool handle_inv(struct peer *peer, struct table *table, struct buf *in)
             if (state != OBSERVED)
                 continue;
             if (!fetch_data(table, peer, type, hsh, false,
-                    get_vote_mask(table, hsh)))
+                    get_vote(table, hsh)))
                 delete(table, hsh);     // Fail-safe (unlikely)
         }
     }
@@ -2239,7 +2239,7 @@ static bool handle_getdata(struct peer *peer, struct table *table,
                     goto retry;
                 set_delay(table, hsh, peer->index, peer->nonce);
                 if (!fetch_data(table, peer, type, hsh, false,
-                        get_vote_mask(table, hsh)))
+                        get_vote(table, hsh)))
                     goto not_found;
                 continue;
             case FETCHING:
