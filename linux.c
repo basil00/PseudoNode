@@ -176,7 +176,12 @@ static inline void event_free(event *e)
 static bool spawn_thread(void *(f)(void *), void *arg)
 {
     pthread_t thread;
-    return (pthread_create(&thread, NULL, f, (void *)arg) == 0);
+    int res = pthread_create(&thread, NULL, f, (void *)arg);
+    if (res != 0)
+        return false;
+    res = pthread_detach(thread);
+    assert(res == 0);
+    return true;
 }
 
 typedef int sock;

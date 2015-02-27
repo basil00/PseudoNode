@@ -156,7 +156,10 @@ static bool spawn_thread(void *(f)(void *), void *arg)
 {
     HANDLE thread = CreateThread(NULL, 1, (LPTHREAD_START_ROUTINE)f,
         (LPVOID)arg, 0, NULL);
-    return (thread != NULL);
+    if (thread == NULL)
+        return false;
+    CloseHandle(thread);
+    return true;
 }
 
 typedef SOCKET sock;

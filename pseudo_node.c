@@ -204,6 +204,17 @@ struct buf
     jmp_buf *env;               // jmp_buf for pop() errors.
 };
 
+// Fetch data info.
+struct fetch
+{
+    uint256_t hash;             // Data hash.
+    uint32_t type;              // Data type.
+    bool sync;                  // Requires synced node.
+    int8_t ttl;                 // TTL.
+    time_t time;                // Time of last request.
+    struct fetch *next;         // Next.
+};
+
 // Peer message queue.
 struct msg
 {
@@ -455,7 +466,7 @@ struct mem
 {
     size_t size;
 };
-#define MAX_SMALL_ALLOC     (4096 - sizeof(struct mem))
+#define MAX_SMALL_ALLOC     3500
 #define BUFFER_SIZE         (4096 - sizeof(struct mem))
 
 static void *mem_alloc(size_t size)
@@ -546,7 +557,7 @@ static void rand64_init(void)
 static uint64_t rand64(void)
 {
     mutex_lock(&rand_lock);
-    if (rnum_idx > sizeof(uint256_t) / sizeof(uint64_t))
+    if (rnum_idx >= sizeof(uint256_t) / sizeof(uint64_t))
     {
         state[0]++;
         if (state[0] == 0)
@@ -1127,7 +1138,7 @@ static void garbage_collect(struct table *table)
 /****************************************************************************/
 // Address queue.
 
-#define MAX_QUEUE       8192
+#define MAX_QUEUE       4096
 
 static mutex queue_lock;
 static ssize_t queue_head = 0;
@@ -1231,6 +1242,94 @@ static void queue_shuffle(void)
         r = r * 333333333323 + 123456789;
     }
     mutex_unlock(&queue_lock);
+}
+
+/****************************************************************************/
+// FETCH QUEUE
+//
+// Sometimes fetch data requests may fail.  Here we attempt to re-fetch data
+// if necessary.
+
+static mutex pending_lock;
+static struct fetch *pending = NULL;
+
+static bool fetch_data(struct table *table, struct peer *peer, uint32_t type,
+    uint256_t hsh, bool sync, uint64_t mask);
+
+// Re-fetch data if necessary.
+static void refetch_data(struct table *table)
+{
+    mutex_lock(&pending_lock);
+    struct fetch *reqs = pending;
+    pending = NULL;
+    mutex_unlock(&pending_lock);
+    if (reqs == NULL)
+        return;
+
+    time_t curr_time = time(NULL);
+    struct fetch *curr = reqs;
+    reqs = NULL;
+    while (curr != NULL)
+    {
+        struct fetch *next = curr->next;
+        unsigned state = get_state(table, curr->hash);
+        if (state != FETCHING)
+        {
+            // Clean-up old entry.
+            mem_free(curr);
+            curr = next;
+            continue;
+        }
+        if (curr_time < curr->time)
+        {
+            curr->next = reqs;
+            reqs = curr;
+            curr = next;
+            continue;
+        }
+        warning("refetching stalled data " HASH_FORMAT_SHORT,
+            HASH_SHORT(curr->hash));
+        fetch_data(table, NULL, curr->type, curr->hash, curr->sync,
+            get_vote(table, curr->hash));
+        curr->ttl--;
+        if (curr->ttl <= 0)
+        {
+            // Give-up.
+            mem_free(curr);
+            curr = next;
+            continue;
+        }
+        curr->time = curr_time + 10;
+        curr->next = reqs;
+        reqs = curr;
+        curr = next;
+    }
+
+    mutex_lock(&pending_lock);
+    while (pending != NULL)
+    {
+        struct fetch *next = pending->next;
+        pending->next = reqs;
+        reqs = pending;
+        pending = next;
+    }
+    pending = reqs;
+    mutex_unlock(&pending_lock);
+}
+
+// Pend a fetch_data request.
+static void pend_fetch(uint256_t hsh, uint32_t type, bool sync)
+{
+    struct fetch *req = (struct fetch *)mem_alloc(sizeof(struct fetch));
+    req->time = time(NULL) + 10;
+    req->ttl  = 3;
+    req->sync = sync;
+    req->type = type;
+    req->hash = hsh;
+    mutex_lock(&pending_lock);
+    req->next = pending;
+    pending = req;
+    mutex_unlock(&pending_lock);
 }
 
 /****************************************************************************/
@@ -1732,8 +1831,8 @@ static bool fetch_data(struct table *table, struct peer *peer, uint32_t type,
     struct peer *p = find_peer(table, peer, sync, mask, hsh);
     if (p == NULL)
     {
-        warning("[%s] failed to get data " HASH_FORMAT_SHORT "; no suitable"
-            " peer", peer->name, HASH_SHORT(hsh));
+        warning("failed to get data " HASH_FORMAT_SHORT "; no suitable peer",
+            HASH_SHORT(hsh));
         return false;
     }
     struct buf *out = alloc_buf(NULL);
@@ -1956,9 +2055,11 @@ static bool handle_inv(struct peer *peer, struct table *table, struct buf *in)
             unsigned state = set_state(table, hsh, FETCHING);
             if (state != OBSERVED)
                 continue;
-            if (!fetch_data(table, peer, type, hsh, false,
+            if (!fetch_data(table, NULL, type, hsh, false,
                     get_vote(table, hsh)))
                 delete(table, hsh);     // Fail-safe (unlikely)
+            else
+                pend_fetch(hsh, type, false);
         }
     }
     return true;
@@ -2241,6 +2342,8 @@ static bool handle_getdata(struct peer *peer, struct table *table,
                 if (!fetch_data(table, peer, type, hsh, false,
                         get_vote(table, hsh)))
                     goto not_found;
+                else
+                    pend_fetch(hsh, type, false);
                 continue;
             case FETCHING:
                 // FETCHING = data is not available, but "getdata" has been
@@ -2272,6 +2375,8 @@ static bool handle_getdata(struct peer *peer, struct table *table,
                     set_delay(table, hsh, peer->index, peer->nonce);
                     if (!fetch_data(table, peer, type, hsh, true, UINT64_MAX))
                         goto not_found;
+                    else
+                        pend_fetch(hsh, type, true);
                     continue;
                 }
                 // Fall through:
@@ -2776,7 +2881,7 @@ static void manager(struct table *table)
             }
         }
 
-        size_t t = 300 + rand64() % 200;
+        size_t t = 300 + rand64() % 800;
         struct timeval tv;
         tv.tv_sec  = t / 1000;
         tv.tv_usec = (t % 1000) * 1000;
@@ -2819,6 +2924,9 @@ static void manager(struct table *table)
                 mem_free(info);
             }
         }
+
+        // Re-fetch any stalled data:
+        refetch_data(table);
     }
 }
 
@@ -2911,6 +3019,7 @@ int main(int argc, char **argv)
     mutex_init(&addr_lock);
     mutex_init(&peer_lock);
     mutex_init(&rand_lock);
+    mutex_init(&pending_lock);
     if (!system_init())
         fatal("OS-dependant init failed");
     rand64_init();
