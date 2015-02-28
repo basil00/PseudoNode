@@ -1289,8 +1289,9 @@ static void refetch_data(struct table *table)
         }
         warning("refetching stalled data " HASH_FORMAT_SHORT,
             HASH_SHORT(curr->hash));
-        fetch_data(table, NULL, curr->type, curr->hash, curr->sync,
-            get_vote(table, curr->hash));
+        uint64_t mask = (curr->sync? get_vote(table, curr->hash):
+            UINT64_MAX);
+        fetch_data(table, NULL, curr->type, curr->hash, curr->sync, mask);
         curr->ttl--;
         if (curr->ttl <= 0)
         {
@@ -2079,6 +2080,7 @@ static bool handle_notfound(struct peer *peer, struct table *table,
         uint256_t hsh = pop(in, uint256_t);
 
         struct delay *delays = get_delays(table, hsh);
+        delete(table, hsh);
         if (delays == NULL)
             continue;
         struct buf *out = alloc_buf(NULL);
