@@ -147,11 +147,6 @@ static inline void event_free(event *e)
     CloseHandle(*e);
 }
 
-#define ref(addr)               \
-    __sync_fetch_and_add((addr), 1)
-#define deref(addr)             \
-    __sync_fetch_and_sub((addr), 1)
-
 static bool spawn_thread(void *(f)(void *), void *arg)
 {
     HANDLE thread = CreateThread(NULL, 1, (LPTHREAD_START_ROUTINE)f,
@@ -180,6 +175,8 @@ static sock socket_open(void)
     unsigned on = 1;
     setsockopt(s, SOL_SOCKET, SO_REUSEADDR, (char *)&on, sizeof(on));
     setsockopt(s, IPPROTO_TCP, TCP_NODELAY, (char *)&on, sizeof(on));
+    DWORD timeout = 120000;     // 2min
+    setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, (char *)&timeout, sizeof(timeout));
     return s;
 }
 
@@ -271,9 +268,10 @@ static ssize_t socket_send(sock s, void *buf, size_t len)
     return len;
 }
 
-static void socket_close(sock s)
+static void socket_close(sock s, bool err)
 {
-    shutdown(s, SD_BOTH);
+    if (!err)
+        shutdown(s, SD_BOTH);
     closesocket(s);
 }
 
