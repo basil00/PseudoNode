@@ -245,10 +245,11 @@ struct peer
     in_port_t from_port;        // Peer local port.
     char *name;                 // Peer name (string version of to_addr).
     uint32_t index;             // Peer index.
-    ssize_t score;              // Peer DoS score.
-    int16_t invs;               // Peer inv limit.
+    int16_t score;              // Peer DoS score.
+    int16_t inv_score;          // Peer inv limit.
     bool ready;                 // Peer is ready? (have seen version message?)
     bool sync;                  // Peer is synced? (up-to-date height?)
+    bool local_sync;            // This peer is synced?
     bool outbound;              // Peer is an outbound connection?
     bool error;                 // Has an error occurred?
 };
@@ -1242,8 +1243,8 @@ static void reset_peers(void)
             continue;
         if (peers[i] == PEER_RESERVE)
             continue;
-        peers[i]->score  = 0;
-        peers[i]->invs = 0;
+        peers[i]->score = 0;
+        peers[i]->inv_score = 0;
     }
     mutex_unlock(&peer_lock);
 }
@@ -1255,7 +1256,7 @@ static void score_peer(struct peer *peer, ssize_t score)
     ssize_t new_score = atomic_add(&peer->score, score);
     if (new_score >= MAX_SCORE)
     {
-        peer->score = INT32_MAX;
+        peer->score = INT16_MAX;
         warning("[%s] disconnecting misbehaving peer", peer->name);
         peer->error = true;
     }
@@ -1513,7 +1514,7 @@ static void finalize_message(struct buf *out)
 }
 
 static void make_version(struct buf *buf, struct peer *peer, uint64_t nonce,
-    uint32_t height, bool use_relay)
+    bool use_relay)
 {
     struct header hdr = {MAGIC, "version", 0, 0};
     push(buf, hdr);
@@ -1531,7 +1532,8 @@ static void make_version(struct buf *buf, struct peer *peer, uint64_t nonce,
     push(buf, peer->from_port);
     push(buf, nonce);
     push_varstr(buf, USER_AGENT);
-    push(buf, height);
+    uint32_t h = get_height();
+    push(buf, h);
     if (use_relay && USE_RELAY)
     {
         uint8_t relay = 1;
@@ -2105,11 +2107,17 @@ static bool handle_inv(struct peer *peer, struct table *table, struct buf *in)
         size_t count = tally(votes);
         if (count == 1)
         {
-            int16_t invs = peer->invs++;
+            int16_t invs = peer->inv_score++;
             if (invs > MAX_INVS)
             {
                 // This peer is inv-flooding, disconnect.
                 warning("[%s] too many invs", peer->name);
+                return false;
+            }
+            if (type == MSG_BLOCK && !peer->local_sync)
+            {
+                // This peer thinks we have an out-of-data height, so do
+                // not trust block invs.  Instead, silently disconnect.
                 return false;
             }
         }
@@ -2671,7 +2679,7 @@ static bool handle_version(struct peer *peer, struct table *table,
     if (!peer->outbound)
     {
         struct buf *out = alloc_buf(NULL);
-        make_version(out, peer, rand64(), get_height(), use_relay);
+        make_version(out, peer, rand64(), use_relay);
         send_message(peer, out);
         deref_buf(out);
     }
@@ -2770,9 +2778,10 @@ static struct peer *open_peer(int s, bool outbound, struct in6_addr addr,
     peer->error = false;
     peer->ready = false;
     peer->sync  = false;
+    peer->local_sync = (h < HEIGHT);
     peer->ref_count = 2;        // 2 for both threads
     peer->score = 0;
-    peer->invs = 0;
+    peer->inv_score = 0;
     peer->alive = curr_time;
     peer->timeout = timeout;
     peer->nonce = rand64();
@@ -2884,7 +2893,7 @@ static void *peer_worker(void *arg)
     {
         // Send version message first for outbound peer.
         struct buf *out = alloc_buf(NULL);
-        make_version(out, peer, rand64(), get_height(), true);
+        make_version(out, peer, rand64(), true);
         send_message(peer, out);
         deref_buf(out);
     }
@@ -3069,7 +3078,7 @@ static void *bootstrap(void *arg)
 #define OPTION_CLIENT       1
 #define OPTION_COIN         2
 #define OPTION_HELP         3
-#define OPTION_MAX_PEERS    4
+#define OPTION_NUM_PEERS    4
 #define OPTION_PEER         5
 #define OPTION_PREFETCH     6
 #define OPTION_SERVER       7
@@ -3103,7 +3112,7 @@ int main(int argc, char **argv)
         {"client",    1, 0, OPTION_CLIENT},
         {"coin",      1, 0, OPTION_COIN},
         {"help",      0, 0, OPTION_HELP},
-        {"max-peers", 1, 0, OPTION_MAX_PEERS},
+        {"num-peers", 1, 0, OPTION_NUM_PEERS},
         {"peer",      1, 0, OPTION_PEER},
         {"prefetch",  0, 0, OPTION_PREFETCH},
         {"server",    0, 0, OPTION_SERVER},
@@ -3154,10 +3163,10 @@ int main(int argc, char **argv)
                 insert_address(table, addr, time(NULL));
                 break;
             }
-            case OPTION_MAX_PEERS:
+            case OPTION_NUM_PEERS:
                 MAX_OUTBOUND_PEERS = atoi(optarg);
                 if (MAX_OUTBOUND_PEERS < 1 || MAX_OUTBOUND_PEERS > 64)
-                    fatal("maximum peers is out of range");
+                    fatal("number-of-peers is out of range");
                 break;
             case OPTION_SERVER:
                 SERVER = true;
@@ -3175,7 +3184,7 @@ int main(int argc, char **argv)
             default:
                 fprintf(stderr, "usage: %s [--help] [--client=NAME] "
                     "[--threshold=VAL] [--server] [--stealth] [--peer=PEER] "
-                    "[--prefetch] [--max-peers=MAX_PEERS] [--coin=COIN]\n\n",
+                    "[--prefetch] [--num-peers=NUM_PEERS] [--coin=COIN]\n\n",
                     argv[0]);
                 fprintf(stderr, "WHERE:\n");
                 fprintf(stderr, "\t--client=CLIENT\n");
@@ -3188,8 +3197,8 @@ int main(int argc, char **argv)
                 fprintf(stderr, "\t--peer=PEER\n");
                 fprintf(stderr, "\t\tAdd PEER (ipv6 address) to the list of "
                     "potential peers.\n");
-                fprintf(stderr, "\t--max-peers=MAX_PEERS\n");
-                fprintf(stderr, "\t\tMaximum outbound connections "
+                fprintf(stderr, "\t--num-peers=NUM_PEERS\n");
+                fprintf(stderr, "\t\tMaximum number of outbound connections "
                     "(default=8).\n");
                 fprintf(stderr, "\t--server\n");
                 fprintf(stderr, "\t\tRun as a server (default=false).\n");
