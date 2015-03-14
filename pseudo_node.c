@@ -2778,7 +2778,7 @@ static struct peer *open_peer(int s, bool outbound, struct in6_addr addr,
     peer->error = false;
     peer->ready = false;
     peer->sync  = false;
-    peer->local_sync = (h < HEIGHT);
+    peer->local_sync = (h > HEIGHT);
     peer->ref_count = 2;        // 2 for both threads
     peer->score = 0;
     peer->inv_score = 0;
