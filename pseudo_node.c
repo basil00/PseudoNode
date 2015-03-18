@@ -2422,7 +2422,7 @@ static bool handle_getdata(struct peer *peer, struct table *table,
             case OBSERVED:
                 // OBSERVED = inv packets seen, but data is not available
                 // yet.  Therefore set state to FETCHING and fetch the data.
-                if (get_vote(table, hsh) < THRESHOLD)
+                if (get_tally(table, hsh) < THRESHOLD)
                     goto not_found;
                 score_peer(peer, 1);
                 state = set_state(table, hsh, FETCHING);
