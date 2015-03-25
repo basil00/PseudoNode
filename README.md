@@ -1,11 +1,10 @@
-PseudoNode 0.5
-==============
+PseudoNode 0.5.0
+================
 
-When is a full node a full node?
+PseudoNode is a cryptocurrency full node "emulator".
 
-PseudoNode is a proof-of-concept cryptocurrency full node "emulator".  On the
-network, PseudoNode behaves the same way as a normal full node by relaying
-transactions, blocks, addresses, etc., etc.  However, unlike a normal full
+To the network, PseudoNode behaves the same way as a full node by relaying
+transactions, blocks, addresses, etc.  However, unlike a normal full
 node, PseudoNode does *not* verify data (txs & blocks) itself.  Rather,
 PseudoNode relies on neighboring peers (with configurable confidence levels)
 to do the verification on PseudoNode's behalf.  As a result, PseudoNode is

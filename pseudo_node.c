@@ -1485,7 +1485,7 @@ static void pend_fetch(uint256_t hsh, uint32_t type, bool sync, uint64_t nonce,
         return;     // Give up...
     struct fetch *req = (struct fetch *)mem_alloc(sizeof(struct fetch));
     req->time = time(NULL) + 10;
-    req->ttl   = 3;
+    req->ttl   = ttl;
     req->nonce = nonce;
     req->sync  = sync;
     req->type  = type;
