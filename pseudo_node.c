@@ -231,7 +231,7 @@ struct peer
 {
     sock sock;                  // Peer socket.
     mutex lock;                 // Peer lock (for messages).
-    event event;                // Peer event (for messages).
+    peer_event peer_event;                // Peer peer_event (for messages).
     time_t timeout;             // Peer timeout.
     uint64_t nonce;             // Peer nonce.
     int32_t ref_count;          // Peer reference count.
@@ -842,7 +842,7 @@ static struct entry *get_entry(struct table *table, uint256_t hsh)
 // Vote some (potential) data into existence.  In effect, this creates and
 // initializes a new entry (if one does not already exist), or records the
 // vote for `vote_idx' of an existing entry.  Each index can only vote once.
-// Inbound peers are not allowed to vote to prevent ballot stuffing.
+// Inbound peers are not allowed to vote to prpeer_event ballot stuffing.
 static uint64_t vote(struct table *table, uint256_t hsh, unsigned type,
     size_t vote_idx)
 {
@@ -1647,7 +1647,7 @@ static void *send_message_worker(void *arg)
     while (true)
     {
         // Wait for a message:
-        if (!event_wait(&peer->event))
+        if (!peer_event_wait(&peer->peer_event))
         {
             // Timeout:
             if (peer->error)
@@ -1720,7 +1720,7 @@ static void send_message(struct peer *peer, struct buf *buf)
         peer->msg_tail = msg;
     }
     mutex_unlock(&peer->lock);
-    event_set(&peer->event);
+    peer_event_set(&peer->peer_event);
 }
 
 // Read message data:
@@ -2773,7 +2773,7 @@ static struct peer *open_peer(int s, bool outbound, struct in6_addr addr,
     peer->msg_len = 0;
     peer->sock = s;
     mutex_init(&peer->lock);
-    event_init(&peer->event);
+    peer_event_init(&peer->peer_event);
     peer->outbound = outbound;
     peer->error = false;
     peer->ready = false;
@@ -2806,7 +2806,7 @@ static void deref_peer(struct peer *peer)
         return;
     socket_close(peer->sock, peer->error);
     mutex_free(&peer->lock);
-    event_free(&peer->event);
+    peer_event_free(&peer->peer_event);
     struct msg *msg = peer->msg_head;
     while (msg != NULL)
     {
