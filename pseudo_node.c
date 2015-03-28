@@ -1356,7 +1356,7 @@ static size_t queue_get_addresses(struct table *table, struct buf *buf,
         mutex_lock(&queue_lock);
         struct in6_addr addr = queue[i % MAX_QUEUE];
         mutex_unlock(&queue_lock);
-        
+
         uint256_t addr_hsh = addr_hash(addr);
         time_t addr_time = get_time(table, addr_hsh);
         if (addr_time == 0 || abs(addr_time - curr_time) > 10800)

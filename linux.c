@@ -36,6 +36,7 @@
 #include <netdb.h>
 #include <pwd.h>
 #include <pthread.h>
+#include <event2/thread.h>
 
 #ifdef MACOSX
 #define s6_addr16       __u6_addr.__u6_addr16
