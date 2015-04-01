@@ -3172,7 +3172,7 @@ int main(int argc, char **argv)
             }
             case OPTION_NUM_PEERS:
                 MAX_OUTBOUND_PEERS = atoi(optarg);
-                if (MAX_OUTBOUND_PEERS < 1 || MAX_OUTBOUND_PEERS > 64)
+                if (MAX_OUTBOUND_PEERS < 1 || MAX_OUTBOUND_PEERS > 256)
                     fatal("number-of-peers is out of range");
                 break;
             case OPTION_SERVER:
