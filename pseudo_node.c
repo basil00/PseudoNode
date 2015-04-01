@@ -2209,9 +2209,9 @@ static bool handle_tx(struct peer *peer, struct table *table, struct buf *in,
   char *tx = pop_data(in, len);
   uint256_t tx_hsh = hash(tx, len);
 
-  char from_addr[INET6_ADDRSTRLEN+1];
-  inet_ntop(AF_INET6, &peer->from_addr, from_addr, sizeof(from_addr));
-  action("recieve",  "%.16llx%.16llx%.16llx%.16llx (tx) from_addr:[%s]", HASH(tx_hsh),from_addr);
+  char to_addr[INET6_ADDRSTRLEN+1];
+  inet_ntop(AF_INET6, &peer->to_addr, to_addr, sizeof(to_addr));
+  action("recieve",  HASH_FORMAT "(tx) from_addr:[%s]", HASH(tx_hsh), to_addr);
 
   // Check that we actually requested the tx, otherwise ignore.
   if (get_state(table, tx_hsh) < FETCHING)
