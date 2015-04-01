@@ -36,8 +36,8 @@
 #include <getopt.h>
 
 // include libevent and thread support
-#include <event.h>
-#include <event2/thread.h>
+//#include <event.h>
+//#include <event2/thread.h>
 
 // Configuration:
 static size_t THRESHOLD = 2;
@@ -2970,6 +2970,7 @@ void accept_handle(const int sfd, const short event, void *arg)
 // Manage all peers.  Create new connections if necessary.
 static void manager(struct table *table)
 {
+  /*
   struct event_base* main_base;
   sock s = socket_open();
   if (s == INVALID_SOCKET)
@@ -2978,7 +2979,7 @@ static void manager(struct table *table)
     fatal("failed to bind socket: %s", get_error());
   if (!socket_listen(s))
     fatal("failed to listen socket: %s", get_error());
-
+  */
   while (true)
     {
       ssize_t idx = alloc_peer(true);

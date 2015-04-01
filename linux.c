@@ -23,7 +23,7 @@
 
 // Linux cruft:
 
-#include <event.h>
+//#include <event.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/types.h>
