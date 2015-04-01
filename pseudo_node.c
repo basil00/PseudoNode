@@ -2935,7 +2935,7 @@ static void *peer_worker(void *arg)
   close_peer(table, peer);
   return NULL;
 }
-
+/*
 void accept_handle(const int sfd, const short event, void *arg)
 {
   struct in6_addr addr;
@@ -2965,7 +2965,7 @@ void accept_handle(const int sfd, const short event, void *arg)
       mem_free(info);
     }
 }
-
+*/
 
 // Manage all peers.  Create new connections if necessary.
 static void manager(struct table *table)
