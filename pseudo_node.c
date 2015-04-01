@@ -36,8 +36,8 @@
 #include <getopt.h>
 
 // include libevent and thread support
-//#include <event.h>
-//#include <event2/thread.h>
+#include <event.h>
+#include <event2/thread.h>
 
 // Configuration:
 static size_t THRESHOLD = 2;
