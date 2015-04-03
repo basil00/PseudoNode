@@ -1098,7 +1098,7 @@ static void garbage_collect(struct table *table)
         struct entry *entry = table->entries[i], *prev = NULL;
         while (entry != NULL)
         {
-            int diff = abs(curr_time - entry->time);
+            long long int diff = llabs(curr_time - entry->time);
             bool del = false;
             switch (entry->type)
             {
@@ -1359,7 +1359,7 @@ static size_t queue_get_addresses(struct table *table, struct buf *buf,
         
         uint256_t addr_hsh = addr_hash(addr);
         time_t addr_time = get_time(table, addr_hsh);
-        if (addr_time == 0 || abs(addr_time - curr_time) > 10800)
+        if (addr_time == 0 || llabs(addr_time - curr_time) > 10800)
             continue;
 
         uint32_t addr_time32 = (uint32_t)addr_time;
