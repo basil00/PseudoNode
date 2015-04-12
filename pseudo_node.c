@@ -21,6 +21,7 @@
  * DEALINGS IN THE SOFTWARE.
  */
 
+#include <event.h>
 #include <assert.h>
 #include <errno.h>
 #include <stdarg.h>
@@ -231,7 +232,7 @@ struct peer
 {
     sock sock;                  // Peer socket.
     mutex lock;                 // Peer lock (for messages).
-    event event;                // Peer event (for messages).
+    peer_event peer_event;                // Peer peer_event (for messages).
     time_t timeout;             // Peer timeout.
     uint64_t nonce;             // Peer nonce.
     int32_t ref_count;          // Peer reference count.
@@ -842,7 +843,7 @@ static struct entry *get_entry(struct table *table, uint256_t hsh)
 // Vote some (potential) data into existence.  In effect, this creates and
 // initializes a new entry (if one does not already exist), or records the
 // vote for `vote_idx' of an existing entry.  Each index can only vote once.
-// Inbound peers are not allowed to vote to prevent ballot stuffing.
+// Inbound peers are not allowed to vote to prpeer_event ballot stuffing.
 static uint64_t vote(struct table *table, uint256_t hsh, unsigned type,
     size_t vote_idx)
 {
@@ -1356,7 +1357,7 @@ static size_t queue_get_addresses(struct table *table, struct buf *buf,
         mutex_lock(&queue_lock);
         struct in6_addr addr = queue[i % MAX_QUEUE];
         mutex_unlock(&queue_lock);
-        
+
         uint256_t addr_hsh = addr_hash(addr);
         time_t addr_time = get_time(table, addr_hsh);
         if (addr_time == 0 || llabs(addr_time - curr_time) > 10800)
@@ -1647,7 +1648,7 @@ static void *send_message_worker(void *arg)
     while (true)
     {
         // Wait for a message:
-        if (!event_wait(&peer->event))
+        if (!peer_event_wait(&peer->peer_event))
         {
             // Timeout:
             if (peer->error)
@@ -1720,7 +1721,7 @@ static void send_message(struct peer *peer, struct buf *buf)
         peer->msg_tail = msg;
     }
     mutex_unlock(&peer->lock);
-    event_set(&peer->event);
+    peer_event_set(&peer->peer_event);
 }
 
 // Read message data:
@@ -2087,11 +2088,11 @@ static bool handle_inv(struct peer *peer, struct table *table, struct buf *in)
     {
         uint32_t type = pop(in, uint32_t);
         uint256_t hsh = pop(in, uint256_t);
-    
+
         // Votes from inbound peers are not trusted.  Otherwise it would be
         // trivial for an attacker to fool PseudoNode into relaying invalid
         // data.  We parse the message anyway to check for errors.
-        if (!peer->outbound) 
+        if (!peer->outbound)
             continue;
 
         // For each type (tx or block), register the vote.  If we have reached
@@ -2205,6 +2206,12 @@ static bool handle_tx(struct peer *peer, struct table *table, struct buf *in,
     char *tx = pop_data(in, len);
     uint256_t tx_hsh = hash(tx, len);
 
+    // this is wwhere tx really in.
+    // here log the ip and tx
+    char name[INET6_ADDRSTRLEN+1];
+    inet_ntop(AF_INET6, &peer->to_addr, name, sizeof(name));
+    action("recieve",HASH_FORMAT " from [%s]",HASH(tx_hsh),name);
+
     // Check that we actually requested the tx, otherwise ignore.
     if (get_state(table, tx_hsh) < FETCHING)
     {
@@ -2306,7 +2313,7 @@ static uint256_t merkle_root(struct buf *in)
     deref_buf(tx_hshs);
     return root;
 }
- 
+
 // Handle "block".  If OK, cache the block (if not old) and forward it to any
 // delayed peers.
 static bool handle_block(struct peer *peer, struct table *table,
@@ -2773,7 +2780,7 @@ static struct peer *open_peer(int s, bool outbound, struct in6_addr addr,
     peer->msg_len = 0;
     peer->sock = s;
     mutex_init(&peer->lock);
-    event_init(&peer->event);
+    peer_event_init(&peer->peer_event);
     peer->outbound = outbound;
     peer->error = false;
     peer->ready = false;
@@ -2806,7 +2813,7 @@ static void deref_peer(struct peer *peer)
         return;
     socket_close(peer->sock, peer->error);
     mutex_free(&peer->lock);
-    event_free(&peer->event);
+    peer_event_free(&peer->peer_event);
     struct msg *msg = peer->msg_head;
     while (msg != NULL)
     {
@@ -2974,7 +2981,7 @@ static void manager(struct table *table)
             msleep(10);
         }
         else if (r > 0)
-        {   
+        {
             struct in6_addr addr;
             int s1 = socket_accept(s, &addr);
             if (s1 == INVALID_SOCKET)
@@ -3165,7 +3172,7 @@ int main(int argc, char **argv)
             }
             case OPTION_NUM_PEERS:
                 MAX_OUTBOUND_PEERS = atoi(optarg);
-                if (MAX_OUTBOUND_PEERS < 1 || MAX_OUTBOUND_PEERS > 64)
+                if (MAX_OUTBOUND_PEERS < 1 || MAX_OUTBOUND_PEERS > 256)
                     fatal("number-of-peers is out of range");
                 break;
             case OPTION_SERVER:

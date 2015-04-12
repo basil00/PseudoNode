@@ -23,6 +23,7 @@
 
 // Linux cruft:
 
+//#include <event.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/types.h>
@@ -35,6 +36,7 @@
 #include <netdb.h>
 #include <pwd.h>
 #include <pthread.h>
+#include <event2/thread.h>
 
 #ifdef MACOSX
 #define s6_addr16       __u6_addr.__u6_addr16
@@ -99,15 +101,15 @@ static inline void msleep(size_t ms)
 }
 
 // Implementation of Windows-style events in pthreads:
-struct event
+struct peer_event
 {
     pthread_mutex_t mutex;
     pthread_cond_t cond;
     bool set;
 };
-typedef struct event event;
+typedef struct peer_event peer_event;
 
-static void event_init(event *e)
+static void peer_event_init(peer_event *e)
 {
     mutex_init(&e->mutex);
     int res;
@@ -122,7 +124,7 @@ static void event_init(event *e)
     e->set = false;
 }
 
-static bool event_wait(event *e)
+static bool peer_event_wait(peer_event *e)
 {
     struct timespec ts;
 #ifndef MACOSX
@@ -152,7 +154,7 @@ static bool event_wait(event *e)
     return true;
 }
 
-static void event_set(event *e)
+static void peer_event_set(peer_event *e)
 {
     mutex_lock(&e->mutex);
     e->set = true;
@@ -161,7 +163,7 @@ static void event_set(event *e)
     assert(res == 0);
 }
 
-static inline void event_free(event *e)
+static inline void peer_event_free(peer_event *e)
 {
     mutex_free(&e->mutex);
     int res = pthread_cond_destroy(&e->cond);
