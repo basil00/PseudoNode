@@ -119,8 +119,8 @@ Short answer: No.
 
 Long answer: Not unless the number of PseudoNodes significantly overwhelms the
 number of normal full nodes.  Otherwise, if PseudoNode can connect to at least
-some good nodes (default 2), then will PseudoNode will acts just like a normal
-node and contributes network bandwidth.
+some good nodes (default 2), then PseudoNode will act just like a normal node
+and contribute network bandwidth.
 
 *Can PseudoNode cause the network to fork?*
 
