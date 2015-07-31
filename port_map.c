@@ -102,6 +102,7 @@ static bool load_library(void)
 // Attempt to add port mapping.
 static void *port_map(void *arg)
 {
+    struct state *S = (struct state *)arg;
     const char *reason = "no reason";
 
     if (!load_library())
@@ -117,7 +118,7 @@ static void *port_map(void *arg)
     }
 
     char port_str[8];
-    int r = snprintf(port_str, sizeof(port_str)-1, "%u", ntohs(PORT));
+    int r = snprintf(port_str, sizeof(port_str)-1, "%u", ntohs(S->port));
     if (r <= 0 || r >= sizeof(port_str)-1)
         fatal("snprintf failed");
 
@@ -151,14 +152,18 @@ static void *port_map(void *arg)
             reason = "failed to add port map";
             goto port_map_failed;
         }
-        action("add", "port map for %s", port_str);
+        struct in6_addr addr;
+        memset(&addr, 0, sizeof(addr));
+        action(S, addr, "add: port map for %s", port_str);
         msleep(1000*60*20);     // 20 Minutes
     }
 
     return NULL;
 
-port_map_failed:
-    warning("automatic port mapping failed (%s); open port %u for inbound "
-        "connections", reason, ntohs(PORT));
+port_map_failed: {}
+    struct in6_addr addr;
+    memset(&addr, 0, sizeof(addr));
+    warning(S, addr, "automatic port mapping failed (%s); open port %u for "
+        "inbound connections", reason, ntohs(S->port));
     return NULL;
 }

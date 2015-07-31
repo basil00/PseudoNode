@@ -34,19 +34,15 @@ extern errno_t rand_s(unsigned int* r);
 
 #define IPV6_V6ONLY         27      // Missing def for MinGW.
 
-#define STDERR              GetStdHandle(STD_ERROR_HANDLE)
-#define color_clear(_)      SetConsoleTextAttribute(STDERR, FOREGROUND_RED | \
-                                FOREGROUND_GREEN | FOREGROUND_BLUE)
-#define color_error(_)      SetConsoleTextAttribute(STDERR, FOREGROUND_RED)
-#define color_warning(_)    SetConsoleTextAttribute(STDERR, FOREGROUND_RED | \
-                                FOREGROUND_GREEN)
-#define color_log(_)        SetConsoleTextAttribute(STDERR, FOREGROUND_GREEN)
-
 static DWORD err_idx;
 #define MAX_ERROR   BUFSIZ
 
 static bool system_init(void)
 {
+    static bool init = true;
+    if (!init)
+        return true;
+    init = false;
     static WSADATA wsa_data;
     WSAStartup(MAKEWORD(2, 2), &wsa_data);
     err_idx = TlsAlloc();
@@ -129,7 +125,7 @@ static inline void event_init(event *e)
 
 static bool event_wait(event *e)
 {
-    DWORD i = WaitForSingleObject(*e, 1000 + rand64() % 1000);
+    DWORD i = WaitForSingleObject(*e, 2000);
     if (i == WAIT_TIMEOUT)
         return false;
     assert(i == WAIT_OBJECT_0);
@@ -207,12 +203,12 @@ static sock socket_accept(sock s, struct in6_addr *addr)
     return s1;
 }
 
-static bool socket_connect(sock s, struct in6_addr addr)
+static bool socket_connect(sock s, struct in6_addr addr, uint16_t port)
 {
     struct sockaddr_in6 sockaddr;
     memset(&sockaddr, 0, sizeof(sockaddr));
     sockaddr.sin6_family = AF_INET6;
-    sockaddr.sin6_port = PORT;
+    sockaddr.sin6_port = port;
     sockaddr.sin6_addr = addr;
     unsigned long on = 1;
     if (ioctlsocket(s, FIONBIO, &on) != 0)
@@ -225,8 +221,8 @@ static bool socket_connect(sock s, struct in6_addr addr)
         return false;
 
     struct timeval tv;
-    tv.tv_sec = 5;
-    tv.tv_usec = rand64() % 1000000;
+    tv.tv_sec = 6;
+    tv.tv_usec = 0;
     fd_set fds;
     FD_ZERO(&fds);
     FD_SET(s, &fds);
@@ -240,8 +236,8 @@ static ssize_t socket_recv(sock s, void *buf, size_t len, bool *timeout)
 {
     *timeout = false;
     struct timeval tv;
-    tv.tv_sec = 1;
-    tv.tv_usec = rand64() % 1000000;
+    tv.tv_sec = 2;
+    tv.tv_usec = 0;
     fd_set fds;
     FD_ZERO(&fds);
     FD_SET(s, &fds);
@@ -276,20 +272,4 @@ static void socket_close(sock s, bool err)
 }
 
 #define s6_addr16  u.Word
-
-static void server(void)
-{
-    // NYI
-}
-
-static void *system_alloc(size_t size)
-{
-    return VirtualAlloc(NULL, size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-}
-
-static void system_free(size_t size, void *ptr)
-{
-    bool res = VirtualFree(ptr, 0, MEM_RELEASE);
-    assert(res);
-}
 

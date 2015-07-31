@@ -1,15 +1,18 @@
 CC = x86_64-w64-mingw32-gcc
 STRIP = x86_64-w64-mingw32-strip
-OBJS = pseudo_node.o sha256.o
-CFLAGS = -std=gnu99 -DWINDOWS -O2 -Wno-unused-value -mthreads
+OBJS = pseudo_node.o
+CFLAGS = -std=gnu99 -DWINDOWS -O2 -Wno-unused-value -mthreads -mconsole -fpic
 CLIBS = -lws2_32 -lkernel32
 
-PseudoNode.exe: $(OBJS)
-	$(CC) $(CFLAGS) -o PseudoNode.exe $(OBJS) $(CLIBS)
+PseudoNode.exe: PseudoNode.dll main.o
+	$(CC) $(CFLAGS) -o PseudoNode.exe main.o $(OBJS) $(CLIBS)
 	$(STRIP) PseudoNode.exe
+
+PseudoNode.dll: $(OBJS)
+	$(CC) $(CFLAGS) --shared -o PseudoNode.dll $(OBJS) $(CLIBS)
 
 pseudo_node.o: pseudo_node.c windows.c
 
 clean:
-	rm -f $(OBJS) node
+	rm -f $(OBJS) main.o PseudoNode.dll PseudoNode.exe
 
