@@ -1,0 +1,16 @@
+CC = clang
+STRIP = strip
+OBJS = txmon.o
+CFLAGS = -std=gnu99 -DLINUX -I../../ -O2 -Wall -Wno-unused-value -fpic
+CLIBS = -L ../../ -lpseudonode -lpthread -ldl -Wl,-R.
+
+txmon.exe: txmon.o
+	$(CC) $(CFLAGS) -o txmon $(OBJS) $(CLIBS)
+	$(STRIP) txmon
+	cp txmon txmon.linux
+
+txmon.o: txmon.c
+
+clean:
+	rm -f $(OBJS) txmon.o txmon txmon.linux
+

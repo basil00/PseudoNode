@@ -1,0 +1,16 @@
+CC = x86_64-w64-mingw32-gcc
+STRIP = x86_64-w64-mingw32-strip
+OBJS = bitmon.o
+CFLAGS = -std=gnu99 -DWINDOWS -I../ -O2 -Wno-unused-value -mthreads \
+    -mconsole -fpic
+CLIBS = -lws2_32 -lkernel32 -L../ -lPseudoNode
+
+BitMon.exe: bitmon.o
+	$(CC) $(CFLAGS) -o BitMon.exe $(OBJS) $(CLIBS)
+	$(STRIP) BitMon.exe
+
+bitmon.o: bitmon.c
+
+clean:
+	rm -f $(OBJS) bitmon.o BitMon.exe
+
