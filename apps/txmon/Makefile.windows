@@ -1,16 +1,18 @@
 CC = x86_64-w64-mingw32-gcc
+WINDRES = x86_64-w64-mingw32-windres
 STRIP = x86_64-w64-mingw32-strip
-OBJS = bitmon.o
-CFLAGS = -std=gnu99 -DWINDOWS -I../ -O2 -Wno-unused-value -mthreads \
+OBJS = txmon.o
+CFLAGS = -std=gnu99 -DWINDOWS -I../../ -O2 -Wno-unused-value -mthreads \
     -mconsole -fpic
-CLIBS = -lws2_32 -lkernel32 -L../ -lPseudoNode
+CLIBS = -lws2_32 -lkernel32 -L../../ -lPseudoNode
 
-BitMon.exe: bitmon.o
-	$(CC) $(CFLAGS) -o BitMon.exe $(OBJS) $(CLIBS)
-	$(STRIP) BitMon.exe
+TxMon.exe: txmon.o
+	$(WINDRES) txmon.rc -O coff -o txmon.res
+	$(CC) $(CFLAGS) -o TxMon.exe $(OBJS) txmon.res $(CLIBS)
+	$(STRIP) TxMon.exe
 
-bitmon.o: bitmon.c
+txmon.o: txmon.c
 
 clean:
-	rm -f $(OBJS) bitmon.o BitMon.exe
+	rm -f $(OBJS) txmon.o
 

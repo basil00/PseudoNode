@@ -4,7 +4,7 @@ OBJS = txmon.o
 CFLAGS = -std=gnu99 -DLINUX -I../../ -O2 -Wall -Wno-unused-value -fpic
 CLIBS = -L ../../ -lpseudonode -lpthread -ldl -Wl,-R.
 
-txmon.exe: txmon.o
+txmon: txmon.o
 	$(CC) $(CFLAGS) -o txmon $(OBJS) $(CLIBS)
 	$(STRIP) txmon
 	cp txmon txmon.linux
@@ -12,5 +12,5 @@ txmon.exe: txmon.o
 txmon.o: txmon.c
 
 clean:
-	rm -f $(OBJS) txmon.o txmon txmon.linux
+	rm -f $(OBJS) txmon.o
 

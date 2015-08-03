@@ -13,5 +13,5 @@ libpseudonode.so: $(OBJS)
 	$(CC) -shared -o libpseudonode.so $(OBJS)
 
 clean:
-	rm -f $(OBJS) main.o libpseudonode.so pseduonode
+	rm -f $(OBJS) main.o
 

@@ -14,5 +14,5 @@ PseudoNode.dll: $(OBJS)
 pseudo_node.o: pseudo_node.c windows.c
 
 clean:
-	rm -f $(OBJS) main.o PseudoNode.dll PseudoNode.exe
+	rm -f $(OBJS) main.o
 

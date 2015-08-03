@@ -48,6 +48,8 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
+#define s6_addr16  u.Word
+extern int inet_pton(int af, const char *src, void *dst);
 #endif      /* WINDOWS */
 
 #include "pseudo_node.h"
