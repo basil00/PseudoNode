@@ -898,6 +898,10 @@ int main(int argc, char **argv)
     if (!isatty(1))
         option_color = false;
 
+#ifdef LINUX
+    signal(SIGPIPE, SIG_IGN);
+#endif
+
     struct PN_callbacks CALLBACKS;
     memset(&CALLBACKS, 0, sizeof(CALLBACKS));
     CALLBACKS.tx    = tx_callback;

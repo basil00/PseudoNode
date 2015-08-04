@@ -39,9 +39,18 @@
 #include <setjmp.h>
 #include <getopt.h>
 
+#ifdef MACOSX
+#define LINUX
+#endif
+
 #ifdef LINUX
 #include <pwd.h>
 #include <arpa/inet.h>
+
+#ifdef MACOSX
+#define s6_addr16       __u6_addr.__u6_addr16
+#endif
+
 #endif      /* LINUX */
 
 #ifdef WINDOWS
@@ -233,6 +242,10 @@ int main(int argc, char **argv)
             "1..max_peers\n");
         return EXIT_FAILURE;
     }
+
+#ifdef LINUX
+        signal(SIGPIPE, SIG_IGN);
+#endif
 
     struct PN_config CONFIG;
     memset(&CONFIG, 0, sizeof(CONFIG));

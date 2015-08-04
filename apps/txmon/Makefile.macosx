@@ -2,7 +2,7 @@ CC = clang
 STRIP = strip
 OBJS = txmon.o
 CFLAGS = -std=gnu99 -DLINUX -I../../ -O2 -Wall -Wno-unused-value -fpic
-CLIBS = -L ../../ -lpseudonode -lpthread -ldl -Wl,-R.
+CLIBS = -L ../../ -lpseudonode -lpthread -ldl -Wl,-rpath -Wl,. 
 
 txmon: txmon.o
 	$(CC) $(CFLAGS) -o txmon $(OBJS) $(CLIBS)

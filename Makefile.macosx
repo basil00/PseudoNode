@@ -1,14 +1,17 @@
 CC = clang
 STRIP = strip
-OBJS = pseudo_node.o sha256.o
-CFLAGS = -std=gnu99 -DMACOSX -O2 -Wall -Wno-unused-value
-CLIBS = -lpthread
+OBJS = pseudo_node.o
+CFLAGS = -std=gnu99 -DMACOSX -O2 -Wall -Wno-unused-value -fpic
+CLIBS = -lpthread -ldl -Wl,-rpath -Wl,.
 
-pseudonode: $(OBJS)
-	$(CC) $(CFLAGS) -o pseudonode $(OBJS) $(CLIBS)
+pseudonode: libpseudonode.dylib main.o
+	$(CC) $(CFLAGS) -o pseudonode main.o $(CLIBS) -L. libpseudonode.dylib
 	$(STRIP) pseudonode
 	cp pseudonode pseudonode.macosx
 
+libpseudonode.dylib: $(OBJS)
+	$(CC) -shared -o libpseudonode.dylib $(OBJS)
+
 clean:
-	rm -f $(OBJS) pseduonode
+	rm -f $(OBJS) main.o
 
