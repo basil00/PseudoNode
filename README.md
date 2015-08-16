@@ -1,5 +1,5 @@
-PseudoNode 0.5.0
-================
+LibPseudoNode 0.6.0
+===================
 
 PseudoNode is a cryptocurrency full node "emulator".
 
@@ -14,11 +14,7 @@ Compared to a normal full node:
 
 * PseudoNode *does not require the blockchain to be downloaded*.
 * PseudoNode can "sync" with the network in seconds.
-* PseudoNode supports multiple cryptocurrencies that are bitcoin derivatives.
-  Currently supported are testnet, litecoin, dogecoin, paycoin and flappycoin.
-  It is reasonably trivial to extend the implementation to support more
-  currencies.
-* PseudoNode is *not* a wallet (cannot be used to store coins).
+* PseudoNode supports multiple cryptocurrencies that are Bitcoin derivatives.
 * PseudoNode uses no disk space (sans the executable), negligible RAM, and
   negligible CPU time.  PseudoNode also consumes less network resources
   (data usage/bandwidth) than a normal full node.
@@ -27,15 +23,52 @@ PseudoNode can be downloaded from here (the official release):
 
 * [https://github.com/basil00/PseudoNode/releases](https://github.com/basil00/PseudoNode/releases)
 
-PseudoNode is currently experimental software.  There are likely to be some
-bugs.
+Usage
+=====
 
-Example Usage
-=============
+As of version 0.6.0, PseudoNode is a library (a.k.a. LibPseudoNode).  The
+PseudoNode library can be used for many applications that would otherwise
+require a full node, but without the inconvenience of a large/slow blockchain
+download and sync.
 
-PseudoNode is currently implemented as a command-line tool.
+To create a basic Bitcoin PseudoNode using the library, simply call the
+function:
 
-By default it will connect to the bitcoin network:
+    struct PN *node = PN_create(NULL, NULL, NULL, 0);
+
+See the `pseudo_node.h` file for more detail documentation about the
+PseudoNode configuration.  Various parameters can be controlled, such
+as:
+
+* Which cryptocurrency PseudoNode connects to (default is Bitcoin).
+* Protocol and node configuration (e.g. extra services bits).
+* Configuration to intercept various networks events, such as the broadcast
+  of a new transaction or block.
+* Whether or not `PN_create` assumes control of the calling thread.
+
+The PseudoNode library supports a callbacks for various events.  For example,
+to intercepting transactions can be achieved via the following pseudo-code:
+
+    struct PN_callbacks CALLBACKS;
+    memset(&CALLBACKS, 0, sizeof(CALLBACKS));
+    CALLBACKS.tx = tx_callback;         // Set transaction call-back
+    struct PN *node = PN_create(NULL, &CALLBACKS, NULL, 0);
+
+The function `tx_callback` will be called for each transaction broadcast on
+the network.  See the sample application `apps/txmon` for an example of how
+this can be used to build a simple transaction monitor.
+
+In addition to the above, PseudoNode allows raw transactions can be broadcast
+to the network using the following function call:
+
+    PN_broadcast_tx(node, tx_data, tx_len);
+
+Reference Program
+=================
+
+A reference PseudoNode is currently implemented as a command-line tool.
+
+By default it will connect to the Bitcoin network:
 
     pseudonode
 
@@ -43,12 +76,10 @@ You can connect to different networks using the --coin=COIN option, e.g.:
 
     pseudonode --coin=testnet
     pseudonode --coin=litecoin
-    pseudonode --coin=dogecoin
-    pseudonode --coin=paycoin
-    pseudonode --coin=flappycoin
+    pseudonode --coin=bitcoin-xt
 
 The current implementation supports the following cryptocurrencies: bitcoin,
-testnet (bitcoin), litecoin, dogecoin, paycoin, flappycoin.
+testnet (bitcoin), litecoin and bitcoin XT.
 
 By default, PseudoNode considers data (tx or blocks) valid if 2 other nodes
 also believe so.  This value can be configured via the --threshold=VAL option,
@@ -87,53 +118,6 @@ Windows can be built via Linux cross compilation and MinGW.  Run the command:
 For MacOSX, run the command:
 
     make -f Makefile.macosx
-
-Technical
-=========
-
-PseudoNode connects to the network just like a normal full node.  Each "inv"
-message it receives is treated as a vote.  After the threshold number of votes
-has been received, then PseudoNode will consider the data valid, and will
-relay it.  This means that PseudoNode will not relay data unless the network
-is already relaying it.
-
-PseudoNode cannot handle some kinds of messages directly, e.g. "getdata" for a
-non-recent block.  For this PseudoNode forwards the message to another node
-and acts as a proxy server.
-
-TODOs
-=====
-
-PseudoNode is currently alpha quality software.  Some ideas for future work:
-
-* Bloom filters.
-* Mining support?  However without the UTXO set only empty blocks can be
-  safely mined.
-
-FAQ
-===
-
-*Does PseudoNode harm the network?*
-
-Short answer: No.
-
-Long answer: Not unless the number of PseudoNodes significantly overwhelms the
-number of normal full nodes.  Otherwise, if PseudoNode can connect to at least
-some good nodes (default 2), then PseudoNode will act just like a normal node
-and contribute network bandwidth.
-
-*Can PseudoNode cause the network to fork?*
-
-No, PseudoNode just follows what other nodes are doing.
-
-*Can PseudoNode steal coins?*
-
-No.
-
-*Can PseudoNodes be banned from the network?*
-
-Not easily.  Requests that PseudoNode cannot handle directly can always be
-forwarded to other (cooperative) full nodes.
 
 LICENSE
 =======
