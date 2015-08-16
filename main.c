@@ -63,6 +63,23 @@ extern int inet_pton(int af, const char *src, void *dst);
 
 #include "pseudo_node.h"
 
+static const char *bitcoin_xt_dns_seeds[] =
+{
+    "seed.bitcoin.sipa.be",
+    "dnsseed.bluematt.me",
+    "dnsseed.bitcoin.dashjr.org",
+    "seed.bitcoinstats.com",
+    "seed.bitnodes.io",
+    "bitseed.xf2.org",
+    NULL
+};
+static const struct PN_coin bitcoin_xt =
+{
+    "bitcoin-xt", bitcoin_xt_dns_seeds,
+    8333, 70010, 0xD9B4BEF9, 360000, true
+};
+const struct PN_coin * const BITCOIN_XT = &bitcoin_xt;
+
 #define OPTION_CLIENT       1
 #define OPTION_COIN         2
 #define OPTION_HELP         3
@@ -107,6 +124,7 @@ int main(int argc, char **argv)
     bool PREFETCH = false;
     unsigned THRESHOLD = 2;
     const char *USER_AGENT = NULL;
+    unsigned long long SERVICES = NODE_NETWORK;
     struct in6_addr peers[32];
     size_t peers_idx = 0;
     memset(peers, 0, sizeof(peers));
@@ -128,6 +146,8 @@ int main(int argc, char **argv)
                     COIN = TESTNET;
                 else if (strcmp(optarg, "litecoin") == 0)
                     COIN = LITECOIN;
+                else if (strcmp(optarg, "bitcoin-xt") == 0)
+                    COIN = BITCOIN_XT;
                 else
                 {
                     fprintf(stderr, "fatal: unknown coin \"%s\"\n", optarg);
@@ -207,8 +227,8 @@ int main(int argc, char **argv)
                 fprintf(stderr, "\t--coin=COIN\n");
                 fprintf(stderr, "\t\tAttach to COIN network "
                     "(default=bitcoin).  Supported coins are:\n");
-                fprintf(stderr, "\t\tbitcoin, testnet, litecoin, dogecoin, "
-                    "paycoin, flappycoin\n");
+                fprintf(stderr, "\t\tbitcoin, testnet, litecoin, "
+                    "bitcoin-xt\n");
                 return 0;
         }
     }
@@ -235,6 +255,11 @@ int main(int argc, char **argv)
             USER_AGENT = "/Satoshi:0.11.0/";
         else if (COIN == LITECOIN)
             USER_AGENT = "/Satoshi:0.8.7.5/";
+        else if (COIN == BITCOIN_XT)
+        {
+            SERVICES |= NODE_GETUTXOS;
+            USER_AGENT = "/Bitcoin XT:0.11.0/";
+        }
     }
     if (THRESHOLD < 1 || THRESHOLD > MAX_OUTBOUND_PEERS)
     {
@@ -244,11 +269,12 @@ int main(int argc, char **argv)
     }
 
 #ifdef LINUX
-        signal(SIGPIPE, SIG_IGN);
+    signal(SIGPIPE, SIG_IGN);
 #endif
 
     struct PN_config CONFIG;
     memset(&CONFIG, 0, sizeof(CONFIG));
+    CONFIG.services = SERVICES;
     CONFIG.user_agent = USER_AGENT;
     CONFIG.threshold = THRESHOLD;
     CONFIG.prefetch  = PREFETCH;
