@@ -3223,6 +3223,10 @@ extern struct PN *PN_create(const struct PN_coin *coin,
     if (!system_init())
         return NULL;
 
+#ifdef LINUX
+    signal(SIGPIPE, SIG_IGN);
+#endif
+
     struct state *S = alloc_state();
     rand64_init(S);
     S->addr_salt = rand64(S);

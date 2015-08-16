@@ -44,7 +44,7 @@ then
     cp LICENSE.txt $INSTALL
     echo "\tcopy $INSTALL/README.md..."
     cp README.md $INSTALL
-    echo "\tcopy $INSTALL/psuedonode..."
+    echo "\tcopy $INSTALL/pseudonode..."
     cp pseudonode.macosx $INSTALL/pseudonode
     echo "\tcopy $INSTALL/libpseudonode.dylib..."
     cp libpseudonode.dylib $INSTALL
