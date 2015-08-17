@@ -81,6 +81,11 @@ You can connect to different networks using the --coin=COIN option, e.g.:
 The current implementation supports the following cryptocurrencies: bitcoin,
 testnet (bitcoin), litecoin and bitcoin XT.
 
+To identify as an full node indistinguishable from the real thing add the 
+`--stealth` option to the command line, for example:
+
+    pseudonode --stealth --coin=bitcoin-xt
+
 By default, PseudoNode considers data (tx or blocks) valid if 2 other nodes
 also believe so.  This value can be configured via the --threshold=VAL option,
 e.g.:
