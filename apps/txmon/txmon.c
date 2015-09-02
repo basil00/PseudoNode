@@ -41,6 +41,10 @@ typedef struct
 
 static bool option_color = true;
 
+#define MAX(a, b)       ((a) < (b)? (b): (a))
+#define GET_BTC(x)      ((double)(x) * 0.00000001)
+#define PERCENT(x, y)   (((double)(x) / (double)(y)) * 100.0)
+
 /***************************************************************************/
 /* CRUFT:                                                                  */
 /***************************************************************************/
@@ -202,6 +206,11 @@ static size_t num_tx_bytes = 0;
 static uint64_t total_val = 0;
 static bool option_verbose = false;
 static bool prev_msg = false;
+
+static size_t num_dice = 0;
+static size_t num_data = 0;
+static size_t num_dust = 0;
+static size_t num_spam = 0;
 
 /****************************************************************************/
 /* TX PARSING                                                               */
@@ -424,6 +433,33 @@ strange:
 }
 
 /***************************************************************************/
+/* TESTS                                                                   */
+/***************************************************************************/
+
+static bool test_is_dice(const char *addr)
+{
+    const char *prefixes[] =
+    {
+        "1Lucky",
+        "1bones",
+        "1change",
+        "1dice",
+        "1bank"
+    };
+    for (size_t i = 0; i < sizeof(prefixes) / sizeof(prefixes[0]); i++)
+    {
+        if (strncmp(addr, prefixes[i], strlen(prefixes[i])) == 0)
+            return true;
+    }
+    return false;
+}
+
+static bool test_is_dust(uint64_t val)
+{
+    return GET_BTC(val) <= 0.00005;     /* = USD$0.01 */
+}
+
+/***************************************************************************/
 /* OUTPUT                                                                  */
 /***************************************************************************/
 
@@ -506,9 +542,6 @@ static void make_input_addr(uint8_t *object, size_t olen, uint8_t prefix,
     make_output_addr(hsh160, prefix, addr);
 }
 
-#define MAX(a, b)       ((a) < (b)? (b): (a))
-#define GET_BTC(x)      ((double)(x) * 0.00000001)
-
 /*
  * Print a transaction.
  */
@@ -546,6 +579,11 @@ parse_error:
     size_t mid = (in_s + in_e) / 2;
 
     time_t t = time(NULL);
+    
+    bool is_dice = false;
+    bool is_data = false;
+    size_t num_dust_outputs = 0;
+    size_t num_outputs = 0;
 
     mutex_lock(&lock);
 
@@ -573,6 +611,7 @@ parse_error:
             
             if (addr[0] != '\0')
             {
+                is_dice = is_dice || test_is_dice(addr);
                 color_input();
                 printf("%s", addr);
                 color_clear();
@@ -597,7 +636,7 @@ parse_error:
             char addr[35];
             uint8_t data[80];
             size_t dlen;
-            bool is_data = false;
+            bool is_data_out = false;
             addr[0] = '\0';
             if (script_is_p2pkh_output(outs[idx], outlens[idx], hash160))
                 make_output_addr(hash160, 0x00, addr);
@@ -605,10 +644,13 @@ parse_error:
                 make_output_addr(hash160, 0x05, addr);
             else if (script_is_data_output(outs[idx], outlens[idx], data,
                     &dlen))
-                is_data = true;
+                is_data_out = true;
             
             if (addr[0] != '\0')
             {
+                is_dice = is_dice || test_is_dice(addr);
+                num_outputs++;
+                num_dust_outputs += test_is_dust(outvals[idx]);
                 color_output();
                 printf("%s", addr);
                 color_clear();
@@ -616,8 +658,9 @@ parse_error:
                 for (size_t j = 0; j < 34 - len; j++)
                     putchar(' ');
             }
-            else if (is_data)
+            else if (is_data_out)
             {
+                is_data = true;
                 color_output();
                 printf("[DATA] \"");
                 size_t space = 26, j;
@@ -705,6 +748,15 @@ parse_error:
         }
         putchar('\n');
     }
+    num_dice += is_dice;
+    num_data += is_data;
+    if (num_dust_outputs > 0 && num_dust_outputs >= num_outputs-1)
+    {
+        num_dust++;
+        if (num_outputs >= 8)
+            num_spam++;
+    }
+
     if (option_verbose)
     {
         printf("NODE  : height=%u in=%u out=%u sent=%.2gMB recv=%.2gMB\n",
@@ -725,9 +777,14 @@ parse_error:
         printf("\n        size=%uB inputs=%u outputs=%u val=%gBTC\n",
             (unsigned)len, (unsigned)num_ins, (unsigned)num_outs,
             GET_BTC(tx_val));
-        printf("TOTALS: #tx=%u #block=%u size=%uB val=%gBTC\n",
-            (unsigned)num_tx, (unsigned)num_blocks, (unsigned)num_tx_bytes,
-            GET_BTC(total_val));
+        printf("TOTALS: #block=%u size=%uB val=%gBTC\n",
+            (unsigned)num_blocks, (unsigned)num_tx_bytes, GET_BTC(total_val));
+        printf("      : #tx=%u #dice=%u (%.2g%%) #data=%u (%.2g%%) "
+            "#dust=%u (%.2g%%) #spam=%u (%.2g%%)\n", (unsigned)num_tx,
+            (unsigned)num_dice, PERCENT(num_dice, num_tx),
+            (unsigned)num_data, PERCENT(num_data, num_tx),
+            (unsigned)num_dust, PERCENT(num_dust, num_tx),
+            (unsigned)num_spam, PERCENT(num_spam, num_tx));
         double vps, sps, txps;
         get_rate_info(t, tx_val, len, &vps, &sps, &txps);
         printf("RATES : tx/s=%.3g bytes/s=%g BTC/s=%g\n",
@@ -897,10 +954,6 @@ int main(int argc, char **argv)
     }
     if (!isatty(1))
         option_color = false;
-
-#ifdef LINUX
-    signal(SIGPIPE, SIG_IGN);
-#endif
 
     struct PN_callbacks CALLBACKS;
     memset(&CALLBACKS, 0, sizeof(CALLBACKS));
