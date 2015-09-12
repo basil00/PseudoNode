@@ -45,6 +45,13 @@ static bool option_color = true;
 #define GET_BTC(x)      ((double)(x) * 0.00000001)
 #define PERCENT(x, y)   (((double)(x) / (double)(y)) * 100.0)
 
+static void hash160(const void *data, size_t len, uint8_t *hsh160)
+{
+    uint8_t hsh256[32];
+    PN_sha256(data, len, hsh256);
+    ripemd160(hsh256, sizeof(hsh256), hsh160);
+}
+
 /***************************************************************************/
 /* CRUFT:                                                                  */
 /***************************************************************************/
@@ -53,6 +60,7 @@ static bool option_color = true;
 
 #include <arpa/inet.h>
 #include <pthread.h>
+#include <unistd.h>
 
 #define color_clear()           if (option_color) fputs("\33[0m", stdout)
 #define color_value()           if (option_color) fputs("\33[31m", stdout)
@@ -259,8 +267,8 @@ static uint64_t pop_varint(struct buf *buf)
 #define OP_RETURN           106
 
 // Parse a transaction.
-static bool parse_tx(struct buf *buf, uint8_t **ins, size_t *inlens,
-    size_t *num_ins, uint8_t **outs, size_t *outlens, uint64_t *outvals,
+static bool parse_tx(struct buf *buf, const uint8_t **ins, size_t *inlens,
+    size_t *num_ins, const uint8_t **outs, size_t *outlens, uint64_t *outvals,
     size_t *num_outs)
 {
     pop(buf, uint32_t);                     // Version.
@@ -307,7 +315,7 @@ static bool parse_tx(struct buf *buf, uint8_t **ins, size_t *inlens,
 }
 
 // Test if a scriptSig is a P2PKH input:
-static bool script_is_p2pkh_input(uint8_t *script, size_t slen,
+static bool script_is_p2pkh_input(const uint8_t *script, size_t slen,
     uint8_t *pub_key)
 {
     if (slen == 0)
@@ -330,7 +338,7 @@ static bool script_is_p2pkh_input(uint8_t *script, size_t slen,
 }
 
 // Test if a scriptSig is a P2SH input:
-static bool script_is_p2sh_input(uint8_t *script, size_t slen,
+static bool script_is_p2sh_input(const uint8_t *script, size_t slen,
     uint8_t *redeem, size_t *rlen)
 {
     ssize_t found = -1, len = 0; 
@@ -380,7 +388,7 @@ static bool script_is_p2sh_input(uint8_t *script, size_t slen,
 }
 
 // Test if a scriptPubKey is a P2PKH output:
-static bool script_is_p2pkh_output(uint8_t *script, size_t slen,
+static bool script_is_p2pkh_output(const uint8_t *script, size_t slen,
     uint8_t *pub_key_hash)
 {
     if (slen != 25)
@@ -393,8 +401,29 @@ static bool script_is_p2pkh_output(uint8_t *script, size_t slen,
     return true;
 }
 
+// Test if a scripePubKey is a legacy P2PK output:
+static bool script_is_p2pk_output(const uint8_t *script, size_t slen,
+    uint8_t *pub_key_hash)
+{
+    if (slen != 35 && slen != 67)
+        return false;
+    if (script[slen-1] != OP_CHECKSIG)
+        return false;
+    switch (script[0])
+    {
+        case 33:
+            hash160(script+1, 33, pub_key_hash);
+            return true;
+        case 65:
+            hash160(script+1, 65, pub_key_hash);
+            return true;
+        default:
+            return false;
+    }
+}
+
 // Test if a scriptPubKey is a P2SH output:
-static bool script_is_p2sh_output(uint8_t *script, size_t slen,
+static bool script_is_p2sh_output(const uint8_t *script, size_t slen,
     uint8_t *script_hash)
 {
     if (slen != 23)
@@ -407,7 +436,7 @@ static bool script_is_p2sh_output(uint8_t *script, size_t slen,
 }
 
 // Test if a scriptPubKey is data:
-static bool script_is_data_output(uint8_t *script, size_t slen,
+static bool script_is_data_output(const uint8_t *script, size_t slen,
     uint8_t *data, size_t *dlen)
 {
     if (slen == 0)
@@ -496,7 +525,7 @@ static bool base58_encode(char *str, size_t slen, const uint8_t *data,
     memset(str, '1', zeroes);
     size_t j;
     for (j = zeroes; i < sizeof(b58); i++, j++)
-        str[j] = base58str[b58[i]];
+        str[j] = base58str[(size_t)b58[i]];
     str[j] = '\0';
     return true;
 }
@@ -523,7 +552,7 @@ static bool base58check_encode(char *str, size_t slen, const uint8_t *data,
  */
 static void make_output_addr(uint8_t *hsh160, uint8_t prefix, char *addr)
 {
-    char tmp[1 + 20];
+    uint8_t tmp[1 + 20];
     tmp[0] = prefix;
     memcpy(tmp+1, hsh160, 20);
     base58check_encode(addr, 35, tmp, sizeof(tmp));
@@ -535,10 +564,8 @@ static void make_output_addr(uint8_t *hsh160, uint8_t prefix, char *addr)
 static void make_input_addr(uint8_t *object, size_t olen, uint8_t prefix,
     char *addr)
 {
-    uint8_t hsh256[32];
-    PN_sha256(object, olen, hsh256);
     uint8_t hsh160[20];
-    ripemd160(hsh256, sizeof(hsh256), hsh160);
+    hash160(object, olen, hsh160);
     make_output_addr(hsh160, prefix, addr);
 }
 
@@ -547,9 +574,9 @@ static void make_input_addr(uint8_t *object, size_t olen, uint8_t prefix,
  */
 static void print_tx(struct PN *node, const uint8_t *tx, size_t len)
 {
-    uint8_t *ins[MAX_INPUTS];
+    const uint8_t *ins[MAX_INPUTS];
     size_t inlens[MAX_INPUTS];
-    uint8_t *outs[MAX_OUTPUTS];
+    const uint8_t *outs[MAX_OUTPUTS];
     size_t outlens[MAX_OUTPUTS];
     uint64_t outvals[MAX_OUTPUTS];
 
@@ -576,7 +603,6 @@ parse_error:
     size_t in_e = lines - (in_d + 1) / 2;
     size_t out_s = 0 + out_d / 2;
     size_t out_e = lines - (out_d + 1) / 2;
-    size_t mid = (in_s + in_e) / 2;
 
     time_t t = time(NULL);
     
@@ -584,6 +610,7 @@ parse_error:
     bool is_data = false;
     size_t num_dust_outputs = 0;
     size_t num_outputs = 0;
+    uint64_t tx_val = 0;
 
     mutex_lock(&lock);
 
@@ -632,16 +659,18 @@ parse_error:
         if (i >= out_s && i < out_e)
         {
             size_t idx = i - out_s;
-            uint8_t hash160[20];
+            uint8_t hsh160[20];
             char addr[35];
             uint8_t data[80];
             size_t dlen;
             bool is_data_out = false;
             addr[0] = '\0';
-            if (script_is_p2pkh_output(outs[idx], outlens[idx], hash160))
-                make_output_addr(hash160, 0x00, addr);
-            else if (script_is_p2sh_output(outs[idx], outlens[idx], hash160))
-                make_output_addr(hash160, 0x05, addr);
+            if (script_is_p2pkh_output(outs[idx], outlens[idx], hsh160))
+                make_output_addr(hsh160, 0x00, addr);
+            else if (script_is_p2pk_output(outs[idx], outlens[idx], hsh160))
+                make_output_addr(hsh160, 0x00, addr);
+            else if (script_is_p2sh_output(outs[idx], outlens[idx], hsh160))
+                make_output_addr(hsh160, 0x05, addr);
             else if (script_is_data_output(outs[idx], outlens[idx], data,
                     &dlen))
                 is_data_out = true;
@@ -687,7 +716,8 @@ parse_error:
                 printf("[UNKNOWN]                         ");
             
             // The following is complicated way to ensure the number fits:
-            color_value(); 
+            color_value();
+            tx_val += outvals[idx];
             double val = GET_BTC(outvals[idx]);
             double btc_val = (double)(unsigned)(val);
             char buf[32];
@@ -750,44 +780,47 @@ parse_error:
     }
     num_dice += is_dice;
     num_data += is_data;
+    bool is_spam = false;
     if (num_dust_outputs > 0 && num_dust_outputs >= num_outputs-1)
     {
         num_dust++;
         if (num_outputs >= 8)
-            num_spam++;
+            is_spam = true;     // Tx creating lots of dust outputs.
     }
+    if (test_is_dust((tx_val * 1000) / (double)len))
+        is_spam = true;         // Big tx for small value.
+    num_spam += is_spam;
 
     if (option_verbose)
     {
-        printf("NODE  : height=%u in=%u out=%u sent=%.2gMB recv=%.2gMB\n",
+        printf("NODE : height=%u in=%u out=%u sent=%.2gMB recv=%.2gMB\n",
             PN_get_info(node, PN_HEIGHT),
             PN_get_info(node, PN_NUM_IN_PEERS),
             PN_get_info(node, PN_NUM_OUT_PEERS),
             (double)PN_get_info(node, PN_NUM_SEND_BYTES) / 1000000.0,
             (double)PN_get_info(node, PN_NUM_RECV_BYTES) / 1000000.0);
-        printf("TX    : hash=");
+        printf("TX   : hash=");
         hash256_t hash;
         PN_sha256d(tx, len, &hash);
         for (size_t i = 0; i < sizeof(hash); i++)
             printf("%.2x", hash.i8[32 - i - 1]);
-        uint64_t tx_val = 0;
-        for (size_t i = 0; i < num_outs; i++)
-            tx_val += outvals[i];
         total_val += tx_val;
-        printf("\n        size=%uB inputs=%u outputs=%u val=%gBTC\n",
+        printf("\n       size=%uB inputs=%u outputs=%u val=%gBTC\n",
             (unsigned)len, (unsigned)num_ins, (unsigned)num_outs,
             GET_BTC(tx_val));
-        printf("TOTALS: #block=%u size=%uB val=%gBTC\n",
-            (unsigned)num_blocks, (unsigned)num_tx_bytes, GET_BTC(total_val));
-        printf("      : #tx=%u #dice=%u (%.2g%%) #data=%u (%.2g%%) "
-            "#dust=%u (%.2g%%) #spam=%u (%.2g%%)\n", (unsigned)num_tx,
+        unsigned time_passed = time(NULL) - rate_time0;
+        printf("TOTAL: #block=%u size=%uB val=%gBTC time=%us\n",
+            (unsigned)num_blocks, (unsigned)num_tx_bytes, GET_BTC(total_val),
+            time_passed);
+        printf("     : #tx=%u #dice=%u %.2g%% #data=%u %.2g%% "
+            "#dust=%u %.2g%% #spam=%u %.2g%%\n", (unsigned)num_tx,
             (unsigned)num_dice, PERCENT(num_dice, num_tx),
             (unsigned)num_data, PERCENT(num_data, num_tx),
             (unsigned)num_dust, PERCENT(num_dust, num_tx),
             (unsigned)num_spam, PERCENT(num_spam, num_tx));
         double vps, sps, txps;
         get_rate_info(t, tx_val, len, &vps, &sps, &txps);
-        printf("RATES : tx/s=%.3g bytes/s=%g BTC/s=%g\n",
+        printf("RATES: tx/s=%.3g bytes/s=%g BTC/s=%g\n",
             txps, sps, GET_BTC(vps));
     }
     prev_msg = false;
@@ -844,19 +877,19 @@ parse_error:
         "+----------------------------------------------------------------+\n");
     if (option_verbose)
     {
-        printf("NODE  : height=%u in=%u out=%u sent=%.2gMB recv=%.2gMB\n",
+        printf("NODE : height=%u in=%u out=%u sent=%.2gMB recv=%.2gMB\n",
             PN_get_info(node, PN_HEIGHT),
             PN_get_info(node, PN_NUM_IN_PEERS),
             PN_get_info(node, PN_NUM_OUT_PEERS),
             (double)PN_get_info(node, PN_NUM_SEND_BYTES) / 1000000.0,
             (double)PN_get_info(node, PN_NUM_RECV_BYTES) / 1000000.0);
-        printf("BLOCK : hash=");
+        printf("BLOCK: hash=");
         hash256_t hash;
         PN_sha256d(block, 80, &hash);
         for (size_t i = 0; i < sizeof(hash); i++)
             printf("%.2x", hash.i8[32 - i - 1]);
-        printf("\n        size=%uB #tx=%u\n", (unsigned)len, (unsigned)num_tx);
-        printf("TOTALS: #tx=%u #block=%u size=%uB val=%gBTC\n",
+        printf("\n       size=%uB #tx=%u\n", (unsigned)len, (unsigned)num_tx);
+        printf("TOTAL: #tx=%u #block=%u size=%uB val=%gBTC\n",
             (unsigned)num_tx, (unsigned)num_blocks, (unsigned)num_tx_bytes,
             GET_BTC(total_val));
     }
@@ -883,7 +916,7 @@ static void print_msg(struct in6_addr addr, const char *msg)
 }
 
 // Transaction callback
-static unsigned char *tx_callback(struct PN *node, unsigned type,
+static unsigned char *tx_callback(struct PN *node, int type,
     struct in6_addr addr, unsigned char *data, unsigned *len)
 {
     print_tx(node, (uint8_t *)data, (size_t)*len);
@@ -891,7 +924,7 @@ static unsigned char *tx_callback(struct PN *node, unsigned type,
 }
 
 // Block callback
-static unsigned char *block_callback(struct PN *node, unsigned type,
+static unsigned char *block_callback(struct PN *node, int type,
     struct in6_addr addr, unsigned char *data, unsigned *len)
 {
     print_block(node, (uint8_t *)data, (size_t)*len);
@@ -899,7 +932,7 @@ static unsigned char *block_callback(struct PN *node, unsigned type,
 }
 
 // Message callback
-static unsigned char *msg_callback(struct PN *node, unsigned type,
+static unsigned char *msg_callback(struct PN *node, int type,
     struct in6_addr addr, unsigned char *data, unsigned *len)
 {
     print_msg(addr, (const char *)data);
@@ -971,7 +1004,7 @@ int main(int argc, char **argv)
     CONFIG.prefetch = true;
 
     unsigned ret = 0;       // Don't return.
-    struct PN *node = PN_create(NULL, &CALLBACKS, &CONFIG, ret);
+    PN_create(NULL, &CALLBACKS, &CONFIG, ret);
 
     return 0;
 }

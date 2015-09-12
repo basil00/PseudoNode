@@ -58,8 +58,8 @@ The function `tx_callback` will be called for each transaction broadcast on
 the network.  See the sample application `apps/txmon` for an example of how
 this can be used to build a simple transaction monitor.
 
-In addition to the above, PseudoNode allows raw transactions can be broadcast
-to the network using the following function call:
+In addition to the above, PseudoNode can broadcast raw transactions using
+using the following function call:
 
     PN_broadcast_tx(node, tx_data, tx_len);
 
@@ -81,10 +81,10 @@ You can connect to different networks using the --coin=COIN option, e.g.:
 The current implementation supports the following cryptocurrencies: bitcoin,
 testnet (bitcoin), litecoin and bitcoin XT.
 
-To identify as an full node indistinguishable from the real thing add the 
-`--stealth` option to the command line, for example:
+To identify as a standard full node, add the `--stealth` option to the command
+line, e.g.:
 
-    pseudonode --stealth --coin=bitcoin-xt
+    pseudonode --stealth
 
 By default, PseudoNode considers data (tx or blocks) valid if 2 other nodes
 also believe so.  This value can be configured via the --threshold=VAL option,
