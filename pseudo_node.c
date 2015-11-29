@@ -1249,7 +1249,7 @@ static void reset_peers(struct state *S)
 // Add/sub peer DoS score.
 static void score_peer(struct state *S, struct peer *peer, ssize_t score)
 {
-    static const ssize_t MAX_SCORE = 100;
+    static const ssize_t MAX_SCORE = 1000;
     ssize_t new_score = atomic_add(&peer->score, score);
     if (new_score >= MAX_SCORE)
     {
@@ -1444,7 +1444,7 @@ static void refetch_data(struct state *S)
             struct peer *p = get_peer(S, i, curr->nonce);
             if (p == NULL)
                 continue;
-            score_peer(S, p, 10);
+            score_peer(S, p, 100);
             deref_peer(p);
             break;
         }
@@ -1846,7 +1846,8 @@ static void relay_message(struct state *S, struct peer *peer,
 static void relay_transaction(struct state *S, struct peer *peer,
     uint64_t mask, uint256_t tx_hsh)
 {
-    action(S, peer->to_addr, "relay: " HASH_FORMAT " (tx)", HASH(tx_hsh));
+    if (peer != NULL)
+        action(S, peer->to_addr, "relay: " HASH_FORMAT " (tx)", HASH(tx_hsh));
     struct buf *out = alloc_buf(NULL);
     make_inv(S, out, MSG_TX, tx_hsh);
     relay_message(S, peer, mask, out);
@@ -1857,7 +1858,9 @@ static void relay_transaction(struct state *S, struct peer *peer,
 static void relay_block(struct state *S, struct peer *peer,
     uint64_t mask, uint256_t blk_hsh)
 {
-    action(S, peer->to_addr, "relay: " HASH_FORMAT " (blk)", HASH(blk_hsh));
+    if (peer != NULL)
+        action(S, peer->to_addr, "relay: " HASH_FORMAT " (blk)",
+            HASH(blk_hsh));
     struct buf *out = alloc_buf(NULL);
     make_inv(S, out, MSG_BLOCK, blk_hsh);
     relay_message(S, peer, mask, out);
@@ -1885,23 +1888,26 @@ static void relay_address(struct state *S, struct peer *peer,
 static struct peer *find_peer(struct state *S, struct peer *peer,
     bool sync, uint64_t mask, uint256_t hsh)
 {
-    uint64_t seen = (UINT64_MAX << S->num_peers) | (~mask);
+    mask &= (UINT64_MAX >> (64 - S->num_peers));
+    size_t count = tally(mask);
     struct peer *p = NULL;
-    while (seen != UINT64_MAX)
+    while (count > 0)
     {
-        size_t r, idx = 0;
-        for (r = rand64(S); r != 0; r >>= 8)
+        size_t bitidx = (rand64(S) % count), i, j;
+        for (i = 0, j = 0; i < 64; i++)
         {
-            idx = r % S->num_peers;
-            uint64_t bit = (1 << idx);
-            if ((bit & seen) == 0)
+            uint64_t bit = ((uint64_t)1 << i);
+            if ((mask & bit) != 0)
             {
-                seen = seen | bit;
-                break;
+                if (j == bitidx)
+                    break;
+                j++;
             }
         }
-        if (r == 0)
-            continue;
+        uint64_t bit = ((uint64_t)1 << i);
+        size_t idx = i;
+        mask &= ~bit;
+        count--;
         p = get_peer(S, idx, 0);
         if (p != NULL && p != peer && p->ready && (!sync || p->sync))
             break;
@@ -1949,7 +1955,7 @@ static void wake_delays(struct state *S, uint256_t hsh, struct delay *delays,
             action(S, p->to_addr, "send: " HASH_FORMAT_SHORT " (%s)",
                 HASH_SHORT(hsh), type);
             send_message(p, out);
-            score_peer(S, p, -1);
+            score_peer(S, p, -10);
         }
         deref_peer(p);
         delays = delays->next;
@@ -2242,6 +2248,7 @@ static bool handle_tx(struct peer *peer, struct state *S, struct buf *in,
     if (tx != tx0)
     {
         free(tx);
+        delete(S->table, tx_hsh);
         return true;
     }
 
@@ -2450,6 +2457,7 @@ static bool handle_block(struct peer *peer, struct state *S,
         if (block != block0)
         {
             mem_free(block);
+            delete(S->table, blk_hsh);
             return true;
         }
 
@@ -2536,7 +2544,7 @@ static bool handle_getdata(struct peer *peer, struct state *S, struct buf *in)
                 // yet.  Therefore set state to FETCHING and fetch the data.
                 if (get_tally(S->table, hsh) < S->threshold)
                     goto not_found;
-                score_peer(S, peer, 1);
+                score_peer(S, peer, 10);
                 state = set_state(S->table, hsh, FETCHING);
                 if (state != OBSERVED)
                     goto retry;
@@ -2562,7 +2570,7 @@ static bool handle_getdata(struct peer *peer, struct state *S, struct buf *in)
                 if (type == MSG_BLOCK)
                 {
                     // Request for an block that was never advertised:
-                    score_peer(S, peer, 1);
+                    score_peer(S, peer, 10);
                     insert(S->table, hsh, BLOCK, S);
                     state = set_state(S->table, hsh, FETCHING);
                     if (state != OBSERVED)
@@ -2639,7 +2647,7 @@ static bool handle_getheaders(struct peer *peer, struct state *S,
     {
         case OBSERVED:
         {
-            score_peer(S, peer, 1);
+            score_peer(S, peer, 10);
             state = set_state(S->table, hsh, FETCHING);
             if (state != OBSERVED)
                 goto retry;
@@ -2656,8 +2664,6 @@ static bool handle_getheaders(struct peer *peer, struct state *S,
     // Forward the request.  Care must be taken not for forward back to the
     // same peer.
     uint64_t mask = UINT64_MAX;
-    if (peer->index >= S->num_peers)
-        mask = mask & ~(1 << peer->index);
     struct peer *p = find_peer(S, peer, true, mask, hsh);
     if (p == NULL)
     {
@@ -2846,6 +2852,7 @@ static bool process_message(struct peer *peer, struct state *S,
         ok = false;         // NYI so drop connection.
     else if (strcmp(hdr.command, "reject") == 0)
     {
+        score_peer(S, peer, 16);
         char *message = pop_varstr(in);
         pop(in, uint8_t);
         char *reason = pop_varstr(in);
@@ -3377,14 +3384,14 @@ static const char *bitcoin_dns_seeds[] =
     "dnsseed.bluematt.me",
     "dnsseed.bitcoin.dashjr.org",
     "seed.bitcoinstats.com",
-    "seed.bitnodes.io",
     "bitseed.xf2.org",
+    "seed.bitcoin.jonasschnelli.ch",
     NULL
 };
 static const struct PN_coin bitcoin =
 {
     "bitcoin", bitcoin_dns_seeds, 
-    8333, 70002, 0xD9B4BEF9, 360000, true
+    8333, 70002, 0xD9B4BEF9, 385000, true
 };
 const struct PN_coin * const BITCOIN = &bitcoin;
 

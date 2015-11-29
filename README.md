@@ -1,4 +1,4 @@
-LibPseudoNode 0.6.0
+LibPseudoNode 0.7.0
 ===================
 
 PseudoNode is a cryptocurrency full node "emulator".
