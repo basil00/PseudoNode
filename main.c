@@ -63,22 +63,28 @@ extern int inet_pton(int af, const char *src, void *dst);
 
 #include "pseudo_node.h"
 
-static const char *bitcoin_xt_dns_seeds[] =
+static const char *bitcoin_dns_seeds[] =
 {
     "seed.bitcoin.sipa.be",
     "dnsseed.bluematt.me",
     "dnsseed.bitcoin.dashjr.org",
     "seed.bitcoinstats.com",
-    "seed.bitnodes.io",
     "bitseed.xf2.org",
+    "seed.bitcoin.jonasschnelli.ch",
     NULL
 };
 static const struct PN_coin bitcoin_xt =
 {
-    "bitcoin-xt", bitcoin_xt_dns_seeds,
-    8333, 70010, 0xD9B4BEF9, 360000, true
+    "bitcoin-xt", bitcoin_dns_seeds,
+    8333, 70010, 0xD9B4BEF9, 390000, true
 };
 const struct PN_coin * const BITCOIN_XT = &bitcoin_xt;
+static const struct PN_coin bitcoin_classic =
+{
+    "bitcoin-classic", bitcoin_dns_seeds,
+    8333, 70002, 0xD9B4BEF9, 390000, true
+};
+const struct PN_coin * const BITCOIN_CLASSIC = &bitcoin_classic;
 
 #define OPTION_CLIENT       1
 #define OPTION_COIN         2
@@ -148,6 +154,8 @@ int main(int argc, char **argv)
                     COIN = LITECOIN;
                 else if (strcmp(optarg, "bitcoin-xt") == 0)
                     COIN = BITCOIN_XT;
+                else if (strcmp(optarg, "bitcoin-classic") == 0)
+                    COIN = BITCOIN_CLASSIC;
                 else
                 {
                     fprintf(stderr, "fatal: unknown coin \"%s\"\n", optarg);
@@ -250,16 +258,18 @@ int main(int argc, char **argv)
     if (STEALTH)
     {
         if (COIN == BITCOIN)
-            USER_AGENT = "/Satoshi:0.11.0/";
+            USER_AGENT = "/Satoshi:0.11.2/";
         else if (COIN == TESTNET)
-            USER_AGENT = "/Satoshi:0.11.0/";
+            USER_AGENT = "/Satoshi:0.11.2/";
         else if (COIN == LITECOIN)
             USER_AGENT = "/Satoshi:0.8.7.5/";
         else if (COIN == BITCOIN_XT)
         {
             SERVICES |= NODE_GETUTXOS;
-            USER_AGENT = "/Bitcoin XT:0.11.0/";
+            USER_AGENT = "/Bitcoin XT:0.11.0C/";
         }
+        else if (COIN == BITCOIN_CLASSIC)
+            USER_AGENT = "/Classic:0.11.2/";
     }
     if (THRESHOLD < 1 || THRESHOLD > MAX_OUTBOUND_PEERS)
     {

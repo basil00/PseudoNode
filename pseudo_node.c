@@ -3391,7 +3391,7 @@ static const char *bitcoin_dns_seeds[] =
 static const struct PN_coin bitcoin =
 {
     "bitcoin", bitcoin_dns_seeds, 
-    8333, 70002, 0xD9B4BEF9, 385000, true
+    8333, 70002, 0xD9B4BEF9, 390000, true
 };
 const struct PN_coin * const BITCOIN = &bitcoin;
 
